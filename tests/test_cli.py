@@ -64,7 +64,7 @@ def test_chat_repl_multi_turn_and_quit(capsys, monkeypatch):
             builds.append(1)
             self.seen: list[str] = []
 
-        def run(self, task, user="user", on_delta=None):
+        def run(self, task, user="user", on_delta=None, on_tool=None):
             self.seen.append(task)
             reply = f"reply#{len(self.seen)}: {task}"
             if on_delta:
@@ -107,7 +107,7 @@ def test_chat_eof_exits_cleanly(capsys, monkeypatch):
         _mcp_mounted: list = []
         def __init__(self):
             self.context = ContextManager()
-        def run(self, task, user="user", on_delta=None):
+        def run(self, task, user="user", on_delta=None, on_tool=None):
             return "x"
 
     monkeypatch.setattr(cli, "_build_loop", lambda **kw: FakeLoop())
@@ -137,7 +137,7 @@ def test_chat_persists_and_resumes(tmp_path, capsys, monkeypatch):
             self.context = ContextManager()
             self._mcp_mounted = []
 
-        def run(self, task, user="user", on_delta=None):
+        def run(self, task, user="user", on_delta=None, on_tool=None):
             self.context.append(Message(role=Role.USER, content=task))
             reply = f"echo:{task}"
             if on_delta:
@@ -190,6 +190,33 @@ def test_chat_resume_missing_fails(capsys, monkeypatch, tmp_path):
     err = capsys.readouterr().err
     assert rc == 2
     assert "not found" in err
+
+
+def test_tool_tracer_prints_name_args_and_result():
+    """_make_tool_tracer prints the tool name, arguments on 'call', and the
+    result + elapsed time on 'return' — full detail for --trace."""
+    lines: list[str] = []
+    tracer = cli._make_tool_tracer(write=lines.append)
+    tracer("call", "db_query", {"arguments": {"sql": "SELECT 1"}})
+    tracer("return", "db_query", {"result": {"rows": [[1]]}, "seconds": 0.123})
+    blob = "".join(lines)
+    assert "call" in blob and "db_query" in blob
+    assert "SELECT 1" in blob              # arguments surfaced
+    assert "return" in blob
+    assert "rows" in blob                  # real result surfaced
+    assert "0.12s" in blob                 # elapsed time formatted
+
+
+def test_tool_tracer_truncates_long_results():
+    """Very long results are truncated so a huge tool payload can't flood the
+    terminal (PII surface is bounded too)."""
+    lines: list[str] = []
+    tracer = cli._make_tool_tracer(write=lines.append)
+    big = "x" * 5000
+    tracer("return", "db_query", {"result": big, "seconds": 0.0})
+    blob = "".join(lines)
+    assert "chars)" in blob                # truncation marker present
+    assert len(blob) < 5000                # not the full 5000-char payload
 
 
 def test_no_command_errors():

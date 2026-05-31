@@ -25,6 +25,7 @@ exception fires the OnError hook before propagating.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 
 from pyclaw.config import SETTINGS
@@ -65,16 +66,24 @@ class AgentLoop:
     max_tool_rounds: int = SETTINGS.max_tool_rounds
     system_prompt: str = "You are PyClaw, a deterministic-first agent."
 
-    def run(self, user_request: str, user: str = "user", on_delta=None) -> str:
+    def run(self, user_request: str, user: str = "user", on_delta=None,
+            on_tool=None) -> str:
         """Run the loop to a final text answer.
 
         If `on_delta` (a callable taking a text chunk) is given, assistant text
         is streamed to it as it is generated — the "streaming replies" stage of
         the agentic loop. The returned value is still the complete final answer,
         so callers that don't stream are unaffected.
+
+        If `on_tool` (a callable) is given, it is invoked around every tool
+        execution so callers can observe the "tool execution" stage live:
+            on_tool("call",   name, {"arguments": args})
+            on_tool("return", name, {"result": result, "seconds": elapsed})
+        It is a pure observer — it never affects control flow (that stays with
+        the permission policy / hooks / HITL, principle #1).
         """
         try:
-            return self._run(user_request, user, on_delta)
+            return self._run(user_request, user, on_delta, on_tool)
         except Exception as exc:  # OnError hook, then re-raise (fail loudly, #6)
             self.hooks.fire(
                 HookPayload(event=HookEvent.ON_ERROR, user=user, extra={"error": str(exc)})
@@ -82,7 +91,7 @@ class AgentLoop:
             raise
 
     # -- internals ------------------------------------------------------------
-    def _run(self, user_request: str, user: str, on_delta=None) -> str:
+    def _run(self, user_request: str, user: str, on_delta=None, on_tool=None) -> str:
         self.hooks.fire(HookPayload(event=HookEvent.PRE_SESSION, user=user))
 
         # Append the system prompt only when the conversation is empty. In
@@ -136,7 +145,7 @@ class AgentLoop:
                 )
             )
             for call in response.tool_calls:
-                output = self._invoke_tool(call, user)
+                output = self._invoke_tool(call, user, on_tool)
                 self.context.append(
                     Message(
                         role=Role.TOOL,
@@ -150,7 +159,7 @@ class AgentLoop:
             "Reached max_tool_rounds without a final answer.", user
         )
 
-    def _invoke_tool(self, call: ToolCall, user: str) -> object:
+    def _invoke_tool(self, call: ToolCall, user: str, on_tool=None) -> object:
         """The single deterministic chokepoint for every tool call."""
         name, args = call.name, dict(call.arguments)
 
@@ -187,8 +196,15 @@ class AgentLoop:
             if decision is not ApprovalDecision.APPROVED:
                 return f"[blocked] approval {decision.value} for {name!r}"
 
-        # Execute the tool.
+        # Execute the tool — notify the observer around dispatch (live trace).
+        if on_tool is not None:
+            on_tool("call", name, {"arguments": args})
+        _t0 = time.perf_counter()
         result = self.tools.dispatch(name, args)
+        if on_tool is not None:
+            on_tool("return", name, {
+                "result": result, "seconds": time.perf_counter() - _t0,
+            })
 
         # L3 — PostToolUse hook (may modify the result / notify).
         post = self.hooks.fire(

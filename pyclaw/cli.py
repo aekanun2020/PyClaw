@@ -151,7 +151,39 @@ def _cmd_run(task: str) -> int:
     return 0
 
 
-def _cmd_chat(resume: str | None = None, no_stream: bool = False) -> int:
+def _make_tool_tracer(write=None):
+    """Return an on_tool(phase, name, info) callback that prints a live trace.
+
+    `--trace` shows the full "tool execution" stage: the tool name, the
+    arguments sent, and the result returned (plus elapsed time). It is OFF by
+    default because results can contain PII (PDPA); the audit log only ever
+    stores hashes, so this verbose view is opt-in.
+    """
+    import json as _json
+
+    out = write or (lambda s: sys.stderr.write(s))
+
+    def _short(value: object, limit: int = 2000) -> str:
+        try:
+            text = value if isinstance(value, str) else _json.dumps(
+                value, ensure_ascii=False, default=str
+            )
+        except (TypeError, ValueError):
+            text = str(value)
+        return text if len(text) <= limit else text[:limit] + f"…(+{len(text) - limit} chars)"
+
+    def on_tool(phase: str, name: str, info: dict) -> None:
+        if phase == "call":
+            out(f"  → call  {name}({_short(info.get('arguments', {}))})\n")
+        elif phase == "return":
+            secs = info.get("seconds", 0.0)
+            out(f"  ← return {name}  [{secs:.2f}s]  {_short(info.get('result'))}\n")
+
+    return on_tool
+
+
+def _cmd_chat(resume: str | None = None, no_stream: bool = False,
+              trace: bool = False) -> int:
     """Interactive multi-turn chat (EliteClaw-style), completing the agentic loop.
 
     The OpenClaw definition of an agentic loop is:
@@ -201,10 +233,11 @@ def _cmd_chat(resume: str | None = None, no_stream: bool = False) -> int:
         sys.stderr.write(f"[session] new {session_id}\n")
 
     stream = not no_stream
+    tracer = _make_tool_tracer() if trace else None
     sys.stderr.write(
         "\nPyClaw chat — multi-turn, history preserved + persisted across turns.\n"
-        f"  streaming: {'on' if stream else 'off'}   session saved to: "
-        f"{store.root}/{session_id}.json\n"
+        f"  streaming: {'on' if stream else 'off'}   trace: {'on' if trace else 'off'}"
+        f"   session saved to: {store.root}/{session_id}.json\n"
         "Type your request and press Enter. Commands: 'quit' / 'exit' to leave.\n\n"
     )
     sys.stderr.flush()
@@ -232,10 +265,10 @@ def _cmd_chat(resume: str | None = None, no_stream: bool = False) -> int:
 
         try:
             if stream:
-                answer = loop.run(task, on_delta=_emit)
+                answer = loop.run(task, on_delta=_emit, on_tool=tracer)
                 sys.stdout.write("\n")  # finish the streamed line
             else:
-                answer = loop.run(task)
+                answer = loop.run(task, on_tool=tracer)
                 sys.stdout.write(answer.rstrip() + "\n")
             sys.stdout.flush()
         except Exception as exc:  # noqa: BLE001 — keep the REPL alive on errors.
@@ -340,6 +373,10 @@ def main(argv: list[str] | None = None) -> int:
         "--no-stream", action="store_true",
         help="disable token streaming (print the full reply at once)",
     )
+    chat_p.add_argument(
+        "--trace", action="store_true",
+        help="show live tool calls + arguments + results (verbose; may reveal PII)",
+    )
 
     sub.add_parser("doctor", help="check config, .agent layout, and layer wiring")
 
@@ -348,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         return _cmd_run(args.task)
     if args.command == "chat":
-        return _cmd_chat(resume=args.resume, no_stream=args.no_stream)
+        return _cmd_chat(resume=args.resume, no_stream=args.no_stream, trace=args.trace)
     if args.command == "doctor":
         return _cmd_doctor()
     return 0
