@@ -15,6 +15,7 @@ every loop it builds is given NO subagent tool, so depth can never exceed 1.
 
 from __future__ import annotations
 
+import inspect
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
@@ -27,6 +28,49 @@ from pyclaw.subagents.types import TYPE_TOOL_POLICY, SubagentSpec
 # returns its final text answer. Injected so the runner is testable without a
 # live LLM, and so the heavy wiring lives in one place (build_isolated_loop).
 LoopFactory = Callable[[SubagentSpec], "object"]
+
+
+def _call_runner(runner: Callable, spec: SubagentSpec, on_tool=None):
+    """Invoke an isolated-run callable, passing `on_tool` only if it accepts it.
+
+    The real `build_isolated_runner` factory accepts `(spec, on_tool=None)` so
+    the parent's live trace observer reaches the subagent's loop. But injected
+    test runners are written as `lambda spec: ...` / `def run(spec): ...` and
+    take only one argument. We inspect the signature and forward `on_tool` only
+    when it is supported — keeping backward-compat while enabling tracing.
+    """
+    if on_tool is not None and _accepts_on_tool(runner):
+        return runner(spec, on_tool=on_tool)
+    return runner(spec)
+
+
+def _accepts_on_tool(runner: Callable) -> bool:
+    """True if `runner` declares an `on_tool` parameter (or **kwargs)."""
+    try:
+        params = inspect.signature(runner).parameters
+    except (TypeError, ValueError):
+        return False
+    if "on_tool" in params:
+        return True
+    return any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
+def _label_on_tool(on_tool, label: str):
+    """Wrap `on_tool` so every call carries a `[sub#N]` label.
+
+    The label is injected into the `info` dict under `_label` (the tracer reads
+    it as a line prefix). Returning None when there is no observer keeps the
+    no-trace path free of any per-call overhead.
+    """
+    if on_tool is None:
+        return None
+
+    def labeled(phase: str, name: str, info: dict) -> None:
+        on_tool(phase, name, {**info, "_label": label})
+
+    return labeled
 
 
 @dataclass
@@ -60,7 +104,7 @@ class SubagentRunner:
         denied.update({"spawn_subagent", "run_subagent"})
         return tuple(t for t in self.parent_tools if t not in denied)
 
-    def spawn(self, spec: SubagentSpec) -> SubagentResult:
+    def spawn(self, spec: SubagentSpec, on_tool=None) -> SubagentResult:
         """Run one subagent to completion in an isolated context.
 
         Order of checks (all deterministic, principle #1):
@@ -69,6 +113,10 @@ class SubagentRunner:
           3. resolve the allowed tools (inherit-then-restrict)
           4. run an isolated agent loop (fresh context) via the factory
           5. return SubagentResult(summary=...) — never leak full history
+
+        `on_tool`, when given, is the parent's live trace observer. It is
+        forwarded into the isolated loop so the subagent's tool calls show up
+        in `--trace` too. It is a pure observer (never changes control flow).
         """
         # 1. No nesting — a subagent must never have been spawned by a subagent.
         if spec.is_nested:
@@ -102,7 +150,7 @@ class SubagentRunner:
         #    raw transcript (still fail-*visible* via ok/error, principle #6).
         runner = self.run_isolated or build_isolated_runner(self.tool_provider)
         try:
-            summary = runner(spec)
+            summary = _call_runner(runner, spec, on_tool)
         except Exception as exc:  # noqa: BLE001 - surface as a structured result
             return SubagentResult(spec=spec, summary="", ok=False, error=str(exc))
 
@@ -122,8 +170,15 @@ class ParallelTeam:
 
     runner: SubagentRunner
 
-    def run(self, specs: list[SubagentSpec]) -> list[SubagentResult]:
-        """Run `specs` concurrently and collect results (order-preserving)."""
+    def run(self, specs: list[SubagentSpec], on_tool=None) -> list[SubagentResult]:
+        """Run `specs` concurrently and collect results (order-preserving).
+
+        `on_tool`, when given, is the parent's live trace observer. Each
+        subagent gets a `[sub#N]`-labelled wrapper (N is 1-based, matching the
+        input order) so the interleaved stderr lines from the concurrent
+        threads are attributable to a specific subagent — direct evidence of
+        real parallelism rather than an inference from timing.
+        """
         if not specs:
             return []
 
@@ -133,7 +188,11 @@ class ParallelTeam:
         results: list[SubagentResult | None] = [None] * len(specs)
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(self.runner.spawn, spec): i
+                pool.submit(
+                    self.runner.spawn,
+                    spec,
+                    _label_on_tool(on_tool, f"[sub#{i + 1}]"),
+                ): i
                 for i, spec in enumerate(specs)
             }
             for future in futures:
@@ -163,7 +222,7 @@ def build_isolated_runner(
       - NO subagent tool (depth stays 1 — principle #3)
     """
 
-    def _run(spec: SubagentSpec) -> str:
+    def _run(spec: SubagentSpec, on_tool=None) -> str:
         from pyclaw.core.llm import OpenRouterProvider
         from pyclaw.core.loop import AgentLoop
         from pyclaw.core.tools import ToolRegistry
@@ -203,6 +262,6 @@ def build_isolated_runner(
                 "You may not spawn other subagents."
             ),
         )
-        return loop.run(spec.objective, user="subagent")
+        return loop.run(spec.objective, user="subagent", on_tool=on_tool)
 
     return _run

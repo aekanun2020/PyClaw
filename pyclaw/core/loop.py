@@ -197,10 +197,20 @@ class AgentLoop:
                 return f"[blocked] approval {decision.value} for {name!r}"
 
         # Execute the tool — notify the observer around dispatch (live trace).
+        # Also publish `on_tool` so a tool fn that itself runs nested agent
+        # loops (the spawn_subagent tool) can forward the SAME observer into its
+        # children, without changing the Tool.fn(arguments) contract. Deferred
+        # import keeps core import-light and avoids a cycle with Layer 4.
+        from pyclaw.subagents.trace import reset_active_on_tool, set_active_on_tool
+
         if on_tool is not None:
             on_tool("call", name, {"arguments": args})
+        _token = set_active_on_tool(on_tool)
         _t0 = time.perf_counter()
-        result = self.tools.dispatch(name, args)
+        try:
+            result = self.tools.dispatch(name, args)
+        finally:
+            reset_active_on_tool(_token)
         if on_tool is not None:
             on_tool("return", name, {
                 "result": result, "seconds": time.perf_counter() - _t0,
