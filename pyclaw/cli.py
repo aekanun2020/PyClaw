@@ -139,6 +139,93 @@ def _build_loop(*, with_memory: bool = True, with_skills: bool = True,
     return loop
 
 
+def _build_orchestrator_loop():
+    """Assemble an Orchestrator AgentLoop (Feature #2).
+
+    The orchestrator owns ONLY the `route_to_agent` meta-tool — no domain
+    tools. The real MCP tools are mounted into a SEPARATE registry that backs
+    the specialized agents (via the runner's tool_provider), so the routed
+    agents execute real tools while the orchestrator itself cannot. AGENTS.md is
+    the source of truth for the agent registry; an empty registry under
+    --orchestrator is a hard error (principle #6).
+    """
+    from pyclaw.core.llm import OpenRouterProvider
+    from pyclaw.core.loop import AgentLoop
+    from pyclaw.core.tools import ToolRegistry
+    from pyclaw.hooks import HookEngine
+    from pyclaw.memory import MemoryLoader
+    from pyclaw.orchestrator import OrchestratorRunner, load_agents, make_route_to_agent_tool
+    from pyclaw.plugins.permissions import PermissionPolicy
+    from pyclaw.runtime.audit import AuditLog
+    from pyclaw.runtime.context import ContextManager
+    from pyclaw.runtime.hitl import HITLGate
+    from pyclaw.subagents.tool import _make_tool_provider
+
+    hooks = HookEngine()
+
+    # Real domain tools live here; the specialized agents draw from this set.
+    domain_tools = ToolRegistry()
+    mounted = _mount_mcp(domain_tools)
+
+    agents = load_agents()
+    if not agents.all():
+        raise RuntimeError(
+            "orchestrator mode requires AGENTS.md with at least one agent "
+            "(none found — fail loudly, principle #6)"
+        )
+
+    runner = OrchestratorRunner(
+        registry=agents,
+        tool_provider=_make_tool_provider(domain_tools),
+        hooks=hooks,
+        available_tools=tuple(domain_tools.names()),
+    )
+
+    # The orchestrator's OWN registry holds nothing but the meta-tool.
+    orch_tools = ToolRegistry()
+    orch_tools.register(make_route_to_agent_tool(runner))
+
+    def _cli_prompt(req) -> bool:
+        sys.stderr.write(f"[approval] run {req.tool} with {req.arguments}? [y/N] ")
+        sys.stderr.flush()
+        try:
+            answer = input().strip().lower()
+        except EOFError:
+            return False
+        return answer in {"y", "yes"}
+
+    system_prompt = (
+        "You are the PyClaw Orchestrator. You have NO domain tools. Your only "
+        "tool is route_to_agent, which dispatches work to specialized agents.\n\n"
+        "Available specialized agents:\n"
+        f"{agents.build_routing_prompt()}\n\n"
+        "Routing rules:\n"
+        "- Analyse the user's intent and route to the agent(s) best suited to it.\n"
+        "- Independent sub-questions: route them in ONE call via 'routes' with "
+        "mode='parallel' so they run concurrently.\n"
+        "- When one agent needs another agent's result, or the user gave an "
+        "explicit order: use 'routes' with mode='sequential'.\n"
+        "- A single question for one agent: use a single {agent, message} route.\n"
+        "- Do NOT invent answers yourself; all real work goes through routing. "
+        "After the agents respond, synthesise their summaries into a final answer."
+    )
+
+    loop = AgentLoop(
+        llm=OpenRouterProvider(),
+        hooks=hooks,
+        context=ContextManager(),
+        audit=AuditLog(),
+        hitl=HITLGate(prompt_fn=_cli_prompt),
+        permissions=PermissionPolicy(allowed_tools=frozenset({orch_tools.names()[0]})),
+        tools=orch_tools,
+        memory=MemoryLoader(Path.cwd()),
+        system_prompt=system_prompt,
+    )
+    loop._mcp_mounted = mounted
+    loop._orchestrator_agents = agents
+    return loop
+
+
 # -- commands -----------------------------------------------------------------
 def _cmd_run(task: str) -> int:
     if not _api_key():
@@ -207,7 +294,8 @@ def _make_tool_tracer(write=None, label: str = ""):
 
 
 def _cmd_chat(resume: str | None = None, no_stream: bool = False,
-              trace: bool = False, subagents: bool = False) -> int:
+              trace: bool = False, subagents: bool = False,
+              orchestrator: bool = False) -> int:
     """Interactive multi-turn chat (EliteClaw-style), completing the agentic loop.
 
     The OpenClaw definition of an agentic loop is:
@@ -235,7 +323,23 @@ def _cmd_chat(resume: str | None = None, no_stream: bool = False,
     from pyclaw.runtime.session import SessionStore
 
     # Build once: this is where MCP servers are dialed and tools registered.
-    loop = _build_loop(with_subagents=subagents)
+    # Orchestrator mode swaps the flat loop for the route_to_agent meta-loop;
+    # the two are mutually exclusive (subagents is ignored when orchestrating,
+    # since routed agents ARE subagents fixed by AGENTS.md).
+    if orchestrator:
+        try:
+            loop = _build_orchestrator_loop()
+        except RuntimeError as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return 2
+        agents = getattr(loop, "_orchestrator_agents", None)
+        if agents is not None:
+            sys.stderr.write(
+                f"[orchestrator] {len(agents.all())} agent(s): "
+                f"{', '.join(agents.names())}\n"
+            )
+    else:
+        loop = _build_loop(with_subagents=subagents)
     mounted = getattr(loop, "_mcp_mounted", [])
     for m in mounted:
         sys.stderr.write(
@@ -262,6 +366,7 @@ def _cmd_chat(resume: str | None = None, no_stream: bool = False,
         "\nPyClaw chat — multi-turn, history preserved + persisted across turns.\n"
         f"  streaming: {'on' if stream else 'off'}   trace: {'on' if trace else 'off'}"
         f"   subagents: {'on' if subagents else 'off'}"
+        f"   orchestrator: {'on' if orchestrator else 'off'}"
         f"   session saved to: {store.root}/{session_id}.json\n"
         "Type your request and press Enter. Commands: 'quit' / 'exit' to leave.\n\n"
     )
@@ -334,6 +439,7 @@ def _cmd_doctor() -> int:
         ("L2 skills", "pyclaw.skills.registry", "SkillRegistry"),
         ("L3 hooks", "pyclaw.hooks.engine", "HookEngine"),
         ("L4 subagents", "pyclaw.subagents.runner", "SubagentRunner"),
+        ("orchestrator", "pyclaw.orchestrator.runner", "OrchestratorRunner"),
         ("L5 plugins", "pyclaw.plugins.loader", "PluginLoader"),
         ("L5 permissions", "pyclaw.plugins.permissions", "PermissionPolicy"),
         ("core/llm", "pyclaw.core.llm", "OpenRouterProvider"),
@@ -407,6 +513,12 @@ def main(argv: list[str] | None = None) -> int:
         help="enable the spawn_subagent tool so the agent can delegate work "
              "to isolated subagents, including parallel teams (extra LLM cost)",
     )
+    chat_p.add_argument(
+        "--orchestrator", action="store_true",
+        help="run in orchestrator mode: the agent owns ONLY route_to_agent and "
+             "auto-routes requests to the specialized agents declared in "
+             "AGENTS.md (db-agent, pdpa-agent), choosing parallel vs sequential",
+    )
 
     sub.add_parser("doctor", help="check config, .agent layout, and layer wiring")
 
@@ -416,7 +528,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_run(args.task)
     if args.command == "chat":
         return _cmd_chat(resume=args.resume, no_stream=args.no_stream,
-                         trace=args.trace, subagents=args.subagents)
+                         trace=args.trace, subagents=args.subagents,
+                         orchestrator=args.orchestrator)
     if args.command == "doctor":
         return _cmd_doctor()
     return 0
