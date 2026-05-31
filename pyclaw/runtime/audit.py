@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,12 +58,10 @@ class AuditLog:
         output_payload: Any,
         user: str = "system",
     ) -> AuditRecord:
-        """Append one record and return it.
+        """Append one record to the JSONL log and return it.
 
-        TODO:
-          - ensure parent dir exists (mkdir parents=True)
-          - file locking / append-only fsync for durability
-          - optional rotation when the file grows large
+        Inputs/outputs are hashed, never stored verbatim (PDPA-friendly). The
+        write is append-only and flushed+fsynced so a crash can't lose a record.
         """
         rec = AuditRecord(
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -72,6 +71,9 @@ class AuditLog:
             output_hash=_hash(output_payload),
             user=user,
         )
-        # TODO: self.path.parent.mkdir(parents=True, exist_ok=True)
-        # TODO: with self.path.open("a", encoding="utf-8") as fh: fh.write(rec.to_json() + "\n")
-        raise NotImplementedError("AuditLog.record: write rec to JSONL (scaffold)")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as fh:
+            fh.write(rec.to_json() + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        return rec

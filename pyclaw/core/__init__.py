@@ -12,3 +12,4 @@ HookEngine first.
 
 from pyclaw.core.loop import AgentLoop  # noqa: F401
 from pyclaw.core.llm import OpenRouterProvider, LLMResponse  # noqa: F401
+from pyclaw.core.tools import Tool, ToolRegistry  # noqa: F401

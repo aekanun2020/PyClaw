@@ -1,0 +1,169 @@
+"""Integration tests for AgentLoop.run — the place where all layers meet.
+
+We inject a scripted fake LLM and fake tools, so the tests assert the
+deterministic guarantees of the loop without any network/LLM calls:
+
+  - a tool call is executed and its result fed back, ending in a text answer
+  - a permission-blocked tool is never executed and is audited
+  - a PreToolUse BLOCK hook stops a tool deterministically
+  - HITL denial blocks a dangerous tool
+  - every tool decision is written to the audit log (JSONL)
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from pyclaw.core.llm import LLMResponse, ToolCall
+from pyclaw.core.loop import AgentLoop
+from pyclaw.core.tools import Tool, ToolRegistry
+from pyclaw.hooks.engine import HookEngine, HookSpec
+from pyclaw.hooks.events import HookAction, HookEvent, HookPayload, HookResult
+from pyclaw.hooks.runners import RunnerType
+from pyclaw.plugins.permissions import PermissionPolicy
+from pyclaw.runtime.audit import AuditLog
+from pyclaw.runtime.context import ContextManager
+from pyclaw.runtime.hitl import ApprovalRequest, HITLGate
+
+
+# --- scripted fake LLM: returns queued responses in order --------------------
+@dataclass
+class FakeLLM:
+    script: list[LLMResponse]
+    seen_messages: list[list[dict]] = field(default_factory=list)
+    _i: int = 0
+
+    def complete(self, messages, tools=None, model=None, temperature=0.0):  # noqa: ANN001
+        self.seen_messages.append(messages)
+        resp = self.script[self._i]
+        self._i += 1
+        return resp
+
+
+@dataclass
+class FakeRunner:
+    table: dict[str, HookResult]
+
+    def run(self, target: str, payload: HookPayload) -> HookResult:  # noqa: ARG002
+        return self.table[target]
+
+
+def _build(tmp_path: Path, *, llm, permissions=None, hooks=None, hitl=None, tools=None):
+    audit = AuditLog(path=tmp_path / "audit.jsonl")
+    return AgentLoop(
+        llm=llm,
+        hooks=hooks or HookEngine(),
+        context=ContextManager(),
+        audit=audit,
+        hitl=hitl or HITLGate(prompt_fn=lambda req: True),
+        permissions=permissions or PermissionPolicy(),
+        tools=tools or ToolRegistry(),
+    ), audit
+
+
+def _echo_registry(calls: list) -> ToolRegistry:
+    reg = ToolRegistry()
+
+    def echo(args):
+        calls.append(args)
+        return {"echoed": args}
+
+    reg.register(Tool(name="echo", description="echo args", fn=echo))
+    return reg
+
+
+def _read_events(path: Path) -> list[str]:
+    return [json.loads(line)["event"] for line in path.read_text().splitlines()]
+
+
+# --- happy path: tool runs, then a text answer -------------------------------
+def test_tool_then_final_answer(tmp_path: Path) -> None:
+    calls: list = []
+    llm = FakeLLM(script=[
+        LLMResponse(text="", tool_calls=[ToolCall(id="1", name="echo", arguments={"x": 1})]),
+        LLMResponse(text="done"),
+    ])
+    loop, audit = _build(tmp_path, llm=llm, tools=_echo_registry(calls))
+    out = loop.run("hello")
+    assert out == "done"
+    assert calls == [{"x": 1}]                       # tool actually executed
+    assert "tool_call" in _read_events(audit.path)   # and audited
+
+
+# --- permission blocks a tool: never executed, audited -----------------------
+def test_permission_blocks_tool(tmp_path: Path) -> None:
+    calls: list = []
+    llm = FakeLLM(script=[
+        LLMResponse(text="", tool_calls=[ToolCall(id="1", name="echo", arguments={})]),
+        LLMResponse(text="finished"),
+    ])
+    policy = PermissionPolicy(blocked_tools=frozenset({"echo"}))
+    loop, audit = _build(tmp_path, llm=llm, permissions=policy, tools=_echo_registry(calls))
+    out = loop.run("hi")
+    assert out == "finished"
+    assert calls == []                                       # NEVER executed
+    assert "tool_blocked_permission" in _read_events(audit.path)
+
+
+# --- PreToolUse BLOCK hook stops the tool deterministically ------------------
+def test_pretooluse_hook_blocks(tmp_path: Path) -> None:
+    calls: list = []
+    eng = HookEngine(runners={RunnerType.PYTHON: FakeRunner(
+        {"block": HookResult(action=HookAction.BLOCK, message="nope")}
+    )})  # type: ignore[arg-type]
+    eng.register(HookSpec(name="b", event=HookEvent.PRE_TOOL_USE,
+                          runner=RunnerType.PYTHON, target="block"))
+    llm = FakeLLM(script=[
+        LLMResponse(text="", tool_calls=[ToolCall(id="1", name="echo", arguments={})]),
+        LLMResponse(text="ok"),
+    ])
+    loop, audit = _build(tmp_path, llm=llm, hooks=eng, tools=_echo_registry(calls))
+    out = loop.run("hi")
+    assert out == "ok"
+    assert calls == []                                  # blocked before execution
+    assert "tool_blocked_hook" in _read_events(audit.path)
+
+
+# --- HITL denial blocks a dangerous tool -------------------------------------
+def test_hitl_denial_blocks(tmp_path: Path) -> None:
+    calls: list = []
+    reg = ToolRegistry()
+
+    def deleter(args):
+        calls.append(args)
+        return "deleted"
+
+    reg.register(Tool(name="delete_file", description="danger", fn=deleter))
+    gate = HITLGate(prompt_fn=lambda req: False)  # human says NO
+    llm = FakeLLM(script=[
+        LLMResponse(text="", tool_calls=[ToolCall(id="1", name="delete_file",
+                                                  arguments={"path": "/x"})]),
+        LLMResponse(text="stopped"),
+    ])
+    loop, audit = _build(tmp_path, llm=llm, hitl=gate, tools=reg)
+    out = loop.run("rm")
+    assert out == "stopped"
+    assert calls == []                               # denied -> not executed
+    assert "hitl_denied" in _read_events(audit.path)
+
+
+# --- PreToolUse MODIFY rewrites the arguments before execution ---------------
+def test_pretooluse_hook_modifies_args(tmp_path: Path) -> None:
+    calls: list = []
+    safe = HookPayload(event=HookEvent.PRE_TOOL_USE, tool="echo",
+                       arguments={"path": "/SAFE"})
+    eng = HookEngine(runners={RunnerType.PYTHON: FakeRunner(
+        {"mod": HookResult(action=HookAction.MODIFY, modified_payload=safe)}
+    )})  # type: ignore[arg-type]
+    eng.register(HookSpec(name="m", event=HookEvent.PRE_TOOL_USE,
+                          runner=RunnerType.PYTHON, target="mod"))
+    llm = FakeLLM(script=[
+        LLMResponse(text="", tool_calls=[ToolCall(id="1", name="echo",
+                                                  arguments={"path": "/DANGER"})]),
+        LLMResponse(text="ok"),
+    ])
+    loop, _ = _build(tmp_path, llm=llm, hooks=eng, tools=_echo_registry(calls))
+    loop.run("hi")
+    assert calls == [{"path": "/SAFE"}]              # args were rewritten by the hook

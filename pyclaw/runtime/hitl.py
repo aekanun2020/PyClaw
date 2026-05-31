@@ -12,6 +12,7 @@ can route to this gate.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
@@ -57,11 +58,20 @@ class HITLGate:
     def request_approval(self, req: ApprovalRequest) -> ApprovalDecision:
         """Block until the human responds or the timeout elapses.
 
-        TODO:
-          - run `prompt_fn` under a timeout (e.g. concurrent.futures / asyncio)
-          - on timeout -> ApprovalDecision.TIMED_OUT (fail-closed = deny)
-          - emit an AuditLog record for the decision
+        Fail-closed: a timeout (or a prompt that raises) is treated as DENIED,
+        never as approval. The core loop is responsible for auditing the
+        returned decision.
         """
         if self.prompt_fn is None:
-            raise NotImplementedError("HITLGate.prompt_fn not configured (scaffold)")
-        raise NotImplementedError("HITLGate.request_approval: enforce timeout (scaffold)")
+            raise RuntimeError("HITLGate.prompt_fn not configured (fail loudly, principle #6)")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(self.prompt_fn, req)
+            try:
+                approved = future.result(timeout=self.timeout_seconds)
+            except FutureTimeout:
+                return ApprovalDecision.TIMED_OUT
+            except Exception:
+                # A misbehaving prompt must not accidentally approve.
+                return ApprovalDecision.DENIED
+        return ApprovalDecision.APPROVED if approved else ApprovalDecision.DENIED

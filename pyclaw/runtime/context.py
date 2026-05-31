@@ -57,15 +57,25 @@ class ContextManager:
         return list(self._messages)
 
     def estimate_tokens(self) -> int:
-        """TODO: real tokenizer; placeholder ~4 chars/token heuristic."""
-        raise NotImplementedError("ContextManager.estimate_tokens (scaffold)")
+        """Cheap heuristic: ~4 characters per token across all message content.
+
+        Good enough to decide *when* to compact; swap in a real tokenizer later
+        without changing callers.
+        """
+        chars = sum(len(m.content) for m in self._messages)
+        return (chars + 3) // 4
 
     def maybe_compact(self) -> bool:
         """Compact if over budget. Returns True if compaction happened.
 
-        TODO:
-          - if estimate_tokens() <= token_budget: return False
-          - new = self.strategy.compact(self._messages, self.token_budget)
-          - swap in `new`, fire PostCompaction hook, return True
+        With no strategy configured this is a safe no-op (returns False), so the
+        agent loop can call it every round unconditionally. The loop fires the
+        PostCompaction hook when this returns True.
         """
-        raise NotImplementedError("ContextManager.maybe_compact (scaffold)")
+        if self.estimate_tokens() <= self.token_budget:
+            return False
+        if self.strategy is None:
+            return False
+        new = self.strategy.compact(self._messages, self.token_budget)
+        self._messages = list(new)
+        return True
