@@ -32,3 +32,8 @@ class SubagentSpec:
     model_preference: str | None = None        # override LLM model
     allowed_tools: tuple[str, ...] = field(default_factory=tuple)  # resolved at spawn time
     is_nested: bool = False                     # must stay False — guarded by runner
+    # Optional per-agent system prompt (persona + boundaries + tool rules). When
+    # None the isolated loop uses the generic subagent prompt (current behaviour
+    # — backward compatible). The orchestrator sets this from an agent's
+    # SOUL.md + TOOLS.md so a routed specialized agent runs with its OWN prompt.
+    system_prompt: str | None = None

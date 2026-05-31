@@ -28,6 +28,15 @@ from pyclaw.skills.registry import parse_frontmatter
 # is found regardless of the process cwd within the tree.
 AGENTS_FILENAME = "AGENTS.md"
 
+# Per-agent persona files (ported 1:1 from EliteClaw). They live under
+# `agents/<name>/` next to AGENTS.md. Loading is OPTIONAL: a missing file simply
+# contributes nothing and the routed agent falls back to the generic subagent
+# prompt — no breakage (principle: additive, defence in depth).
+SOUL_FILENAME = "SOUL.md"
+TOOLS_FILENAME = "TOOLS.md"
+# The directory holding the per-agent folders, relative to AGENTS.md's location.
+AGENTS_HOME_DIRNAME = "agents"
+
 
 @dataclass
 class AgentSpec:
@@ -36,6 +45,11 @@ class AgentSpec:
     name: str
     description: str
     tool_prefixes: tuple[str, ...] = field(default_factory=tuple)
+    # The agent's home dir (`agents/<name>/`), resolved at load time. None when
+    # AGENTS.md was loaded from a path we couldn't anchor a home against (e.g. a
+    # synthetic registry in tests). May be overridden by a `home:` frontmatter
+    # key; otherwise it is derived from the agent name (name-based discovery).
+    home: Path | None = None
 
     def owns(self, tool_name: str) -> bool:
         """True when `tool_name` belongs to this agent's tool group."""
@@ -44,6 +58,44 @@ class AgentSpec:
     def resolve_tools(self, available: tuple[str, ...]) -> tuple[str, ...]:
         """The subset of `available` tool names this agent is allowed to use."""
         return tuple(n for n in available if self.owns(n))
+
+    def _read_home_file(self, filename: str) -> str | None:
+        """Read `home/<filename>` if it exists, else None (optional loading)."""
+        if self.home is None:
+            return None
+        candidate = self.home / filename
+        if not candidate.is_file():
+            return None
+        text = candidate.read_text(encoding="utf-8").strip()
+        return text or None
+
+    def load_soul(self) -> str | None:
+        """The agent's SOUL.md body, or None when absent."""
+        return self._read_home_file(SOUL_FILENAME)
+
+    def load_tools_doc(self) -> str | None:
+        """The agent's TOOLS.md body, or None when absent."""
+        return self._read_home_file(TOOLS_FILENAME)
+
+    def compose_system_prompt(self, guardrail: str | None = None) -> str | None:
+        """Assemble this agent's per-agent system prompt from SOUL + TOOLS.
+
+        Returns the composed persona (SOUL.md, then TOOLS.md), optionally with
+        `guardrail` appended so the generic anti-hallucination protection stays
+        in force as defence in depth (SOUL/TOOLS are ADDITIVE persona, never a
+        replacement for the guardrail or the tool allowlist).
+
+        Returns None when NEITHER SOUL.md nor TOOLS.md exists, so the caller can
+        fall back to the current generic subagent prompt with no breakage.
+        """
+        soul = self.load_soul()
+        tools_doc = self.load_tools_doc()
+        if soul is None and tools_doc is None:
+            return None
+        parts: list[str] = [p for p in (soul, tools_doc) if p]
+        if guardrail:
+            parts.append(guardrail.strip())
+        return "\n\n".join(parts)
 
 
 def _split_blocks(text: str) -> list[str]:
@@ -136,6 +188,7 @@ def load_agents(path: Path | None = None) -> AgentRegistry:
         return registry
 
     text = agents_file.read_text(encoding="utf-8")
+    base = agents_file.parent
     for block in _split_blocks(text):
         fields, _ = parse_frontmatter(block)
         name = fields.get("name")
@@ -146,6 +199,22 @@ def load_agents(path: Path | None = None) -> AgentRegistry:
                 name=name,
                 description=fields.get("description", ""),
                 tool_prefixes=_parse_prefixes(fields.get("tools", "")),
+                home=_resolve_home(base, name, fields.get("home")),
             )
         )
     return registry
+
+
+def _resolve_home(base: Path, name: str, home_override: str | None) -> Path:
+    """Resolve an agent's home dir for SOUL.md/TOOLS.md discovery.
+
+    `base` is the directory containing AGENTS.md. By default the home is
+    name-based: `<base>/agents/<name>/` (matching the AGENTS.md agent `name`).
+    An optional `home:` frontmatter key overrides this — absolute paths are used
+    as-is, relative ones are resolved against `base`. The path is returned even
+    when it does not exist; the OPTIONAL file reads in AgentSpec handle absence.
+    """
+    if home_override:
+        override = Path(home_override)
+        return override if override.is_absolute() else (base / override)
+    return base / AGENTS_HOME_DIRNAME / name

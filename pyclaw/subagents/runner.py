@@ -29,6 +29,25 @@ from pyclaw.subagents.types import TYPE_TOOL_POLICY, SubagentSpec
 # live LLM, and so the heavy wiring lives in one place (build_isolated_loop).
 LoopFactory = Callable[[SubagentSpec], "object"]
 
+# The generic subagent system prompt. Used as-is when a spec carries no
+# per-agent prompt, and exported as the anti-hallucination GUARDRAIL that the
+# orchestrator appends beneath an agent's SOUL/TOOLS persona (defence in depth:
+# "use real tools, don't invent data" survives even with a custom persona).
+GENERIC_SUBAGENT_PROMPT = (
+    "You are a PyClaw {kind} subagent. "
+    "Work ONLY on the objective using the tools provided; do NOT "
+    "invent data. If you cannot verify something with a tool, say so. "
+    "When done, reply with a concise summary. "
+    "You may not spawn other subagents."
+)
+
+# The persona-agnostic guardrail clause appended below SOUL/TOOLS personas.
+SUBAGENT_GUARDRAIL = (
+    "Work ONLY on the objective using the tools provided; do NOT invent data. "
+    "If you cannot verify something with a tool, say so. When done, reply with "
+    "a concise summary. You may not spawn other subagents."
+)
+
 
 def _call_runner(runner: Callable, spec: SubagentSpec, on_tool=None):
     """Invoke an isolated-run callable, passing `on_tool` only if it accepts it.
@@ -246,6 +265,10 @@ def build_isolated_runner(
         else:
             tools = ToolRegistry()
 
+        # Per-agent persona (SOUL.md + TOOLS.md) takes precedence when the
+        # orchestrator supplied one; otherwise fall back to the generic prompt
+        # (current behaviour — backward compatible). Either way the permission
+        # allowlist above still gates every tool dispatch (defence in depth).
         loop = AgentLoop(
             llm=llm,
             hooks=HookEngine(),          # subagents inherit no parent hooks by default
@@ -254,12 +277,8 @@ def build_isolated_runner(
             hitl=HITLGate(),
             permissions=permissions,
             tools=tools,
-            system_prompt=(
-                f"You are a PyClaw {spec.type.value} subagent. "
-                "Work ONLY on the objective using the tools provided; do NOT "
-                "invent data. If you cannot verify something with a tool, say so. "
-                "When done, reply with a concise summary. "
-                "You may not spawn other subagents."
+            system_prompt=spec.system_prompt or GENERIC_SUBAGENT_PROMPT.format(
+                kind=spec.type.value
             ),
         )
         return loop.run(spec.objective, user="subagent", on_tool=on_tool)

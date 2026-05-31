@@ -10,9 +10,14 @@ from __future__ import annotations
 import threading
 import time
 
-from pyclaw.orchestrator.registry import AgentRegistry, AgentSpec
+from pathlib import Path
+
+from pyclaw.orchestrator.registry import AgentRegistry, AgentSpec, load_agents
 from pyclaw.orchestrator.runner import OrchestratorRunner
 from pyclaw.orchestrator.tool import ROUTE_TOOL_NAME, make_route_to_agent_tool
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+AGENTS_MD = REPO_ROOT / "AGENTS.md"
 
 
 def _registry() -> AgentRegistry:
@@ -208,3 +213,63 @@ def test_route_tool_schema_enumerates_agents():
     assert spec["function"]["name"] == ROUTE_TOOL_NAME
     props = spec["function"]["parameters"]["properties"]
     assert set(props["agent"]["enum"]) == {"db-agent", "pdpa-agent"}
+
+
+# -- per-agent SOUL/TOOLS prompt threading (Feature: agent souls) -------------
+def _prompt_recording_runner(record: list):
+    """A run_isolated that records the spec's system_prompt for each run."""
+
+    def run_isolated(spec, on_tool=None):
+        record.append(spec.system_prompt)
+        return f"answer:{spec.objective}"
+
+    return run_isolated
+
+
+def test_route_one_passes_db_agents_own_system_prompt():
+    """Routing to db-agent threads db-agent's composed SOUL/TOOLS prompt down."""
+    record: list = []
+    runner = OrchestratorRunner(
+        registry=load_agents(AGENTS_MD),
+        run_isolated=_prompt_recording_runner(record),
+        available_tools=AVAILABLE,
+    )
+    runner.route_one("db-agent", "how many employees?")
+    prompt = record[0]
+    assert prompt is not None
+    assert "read-only เท่านั้น" in prompt          # db-agent SOUL boundary
+    assert "db_preview_table" in prompt             # db-agent TOOLS rule
+    # The anti-hallucination guardrail is still appended (defence in depth).
+    assert "do NOT invent data" in prompt
+    # No cross-agent persona leakage.
+    assert "พ.ร.บ.คุ้มครองข้อมูลส่วนบุคคล" not in prompt
+
+
+def test_route_one_passes_pdpa_agents_own_system_prompt():
+    record: list = []
+    runner = OrchestratorRunner(
+        registry=load_agents(AGENTS_MD),
+        run_isolated=_prompt_recording_runner(record),
+        available_tools=AVAILABLE,
+    )
+    runner.route_one("pdpa-agent", "what is section 79?")
+    prompt = record[0]
+    assert prompt is not None
+    assert "พ.ร.บ.คุ้มครองข้อมูลส่วนบุคคล" in prompt   # pdpa SOUL identity
+    assert "pdpa_get_penalty" in prompt                # pdpa TOOLS rule
+    assert "read-only เท่านั้น" not in prompt           # not db-agent's persona
+
+
+def test_route_one_without_soul_tools_falls_back_to_generic(tmp_path):
+    """An agent lacking SOUL/TOOLS gets system_prompt=None -> generic fallback."""
+    f = tmp_path / "AGENTS.md"
+    f.write_text("---\nname: db-agent\ndescription: d\ntools: db_\n---\n", encoding="utf-8")
+    record: list = []
+    runner = OrchestratorRunner(
+        registry=load_agents(f),
+        run_isolated=_prompt_recording_runner(record),
+        available_tools=AVAILABLE,
+    )
+    result = runner.route_one("db-agent", "how many employees?")
+    assert result.ok                      # no breakage
+    assert record[0] is None              # generic prompt used by the loop
