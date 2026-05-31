@@ -76,8 +76,9 @@ pip install -e .
 export OPENROUTER_API_KEY="sk-or-..."
 
 # 2) Your MCP server(s) — add as many as you like (EliteClaw-compatible).
-#    A URL ending in /mcp is auto-detected as Streamable HTTP; otherwise SSE.
-export MCP_SERVER_1_URL="http://127.0.0.1:9000"
+#    A URL ending in /mcp is auto-detected as Streamable HTTP; otherwise classic
+#    SSE — for which you point the URL at the event-stream path (usually /sse).
+export MCP_SERVER_1_URL="http://127.0.0.1:9000/sse"
 export MCP_SERVER_1_NAME="mssql"
 export MCP_SERVER_1_PREFIX="db_"      # tools become db_<toolname>
 

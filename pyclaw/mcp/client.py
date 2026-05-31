@@ -9,8 +9,14 @@ the Model Context Protocol spec:
   tools/list           -> [{name, description, inputSchema}, ...]
   tools/call           -> {content: [...], isError?: bool}
 
-Transport here is HTTP POST (Streamable HTTP); on a connect/transport failure
-we retry once with `config.fallback`. MCP tools are returned as `McpTool` and
+Two transports are supported, matching the MCP spec:
+  * Streamable HTTP — a single ``POST <url>`` (URL usually ends ``/mcp``); the
+    reply is inline JSON or an SSE-framed JSON body.
+  * classic SSE     — open ``GET <url>`` (e.g. ``/sse``); the server replies
+    ``event: endpoint`` with a ``/messages?session_id=...`` URL; requests are
+    POSTed there and replies arrive back over the open GET stream.
+On a connect/transport failure we retry once with `config.fallback`. MCP tools
+are returned as `McpTool` and
 can be adapted into the local ToolRegistry shape so the agent loop dispatches
 them through the SAME hook + permission chokepoints as native tools
 (principle #1).
@@ -24,6 +30,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 
@@ -89,6 +96,110 @@ class McpError(RuntimeError):
     """A JSON-RPC error or transport failure from an MCP server."""
 
 
+class _SseSession:
+    """Classic MCP SSE transport: a persistent GET stream + a POST channel.
+
+    The HTTP+SSE transport (MCP spec 2024-11-05) works in two endpoints:
+
+      1. open ``GET <url>`` with ``Accept: text/event-stream``; the server's
+         first frame is ``event: endpoint`` whose ``data:`` is the relative
+         URL to POST messages to (carrying a ``session_id``);
+      2. each JSON-RPC request is ``POST``ed to that messages URL; the reply
+         arrives back as a ``message`` frame on the open GET stream, matched by
+         JSON-RPC ``id``.
+
+    This differs from Streamable HTTP (single ``POST <url>/mcp`` with an inline
+    reply), which ``McpClient._post`` already handles directly. A server whose
+    root only allows GET and hands out ``/messages?session_id=...`` needs this.
+    """
+
+    def __init__(self, url: str, headers: dict[str, str], timeout: float):
+        self._url = url
+        self._headers = headers
+        self._timeout = timeout
+        self._client: httpx.Client | None = None
+        self._stream_cm: Any = None
+        self._lines: Any = None  # iterator over the open stream's lines
+        self.messages_url: str = ""
+
+    def open(self) -> None:
+        """Open the GET stream and read the ``endpoint`` frame."""
+        self._client = httpx.Client(timeout=httpx.Timeout(self._timeout, read=None))
+        get_headers = {"Accept": "text/event-stream", **self._headers}
+        self._stream_cm = self._client.stream("GET", self._url, headers=get_headers)
+        resp = self._stream_cm.__enter__()
+        if resp.status_code >= 400:
+            self.close()
+            raise McpError(f"MCP SSE GET {self._url} -> HTTP {resp.status_code}")
+        self._lines = resp.iter_lines()
+        endpoint = self._read_frame(want_event="endpoint")
+        if not endpoint:
+            self.close()
+            raise McpError("MCP SSE stream closed before sending an endpoint")
+        # endpoint data is a (usually relative) URL; resolve against the GET url
+        self.messages_url = urljoin(self._url, endpoint.strip())
+
+    def request(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        """POST a JSON-RPC envelope; return the correlated reply from the stream.
+
+        Notifications (no ``id``) are POSTed and not awaited.
+        """
+        assert self._client is not None
+        post_headers = {"Content-Type": "application/json", **self._headers}
+        resp = self._client.post(self.messages_url, json=envelope, headers=post_headers)
+        if resp.status_code >= 400:
+            raise McpError(f"MCP SSE POST {resp.status_code}: {resp.text[:300]}")
+        want_id = envelope.get("id")
+        if want_id is None:
+            return {}
+        # Read message frames until we see the one matching our request id.
+        while True:
+            data = self._read_frame(want_event="message")
+            if data is None:
+                raise McpError("MCP SSE stream closed before a reply arrived")
+            try:
+                obj = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and obj.get("id") == want_id:
+                return obj
+
+    def _read_frame(self, *, want_event: str) -> str | None:
+        """Read SSE frames; return the ``data:`` of the next frame whose event
+        matches ``want_event`` (events default to ``message`` per the SSE spec).
+        Returns None when the stream ends."""
+        event = "message"
+        data_lines: list[str] = []
+        for raw in self._lines:  # type: ignore[union-attr]
+            line = raw.rstrip("\r")
+            if line == "":  # blank line dispatches the buffered event
+                if data_lines:
+                    if event == want_event:
+                        return "\n".join(data_lines)
+                    event, data_lines = "message", []
+                continue
+            if line.startswith(":"):  # comment / keep-alive
+                continue
+            if line.startswith("event:"):
+                event = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:"):].lstrip())
+        return None
+
+    def close(self) -> None:
+        try:
+            if self._stream_cm is not None:
+                self._stream_cm.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if self._client is not None:
+                self._client.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self._stream_cm = self._client = self._lines = None
+
+
 @dataclass
 class McpClient:
     config: McpServerConfig
@@ -96,6 +207,7 @@ class McpClient:
     # Defaults to httpx; tests substitute a fake so no network is needed.
     poster: Any = None
     _connected: bool = False
+    _sse: Any = None
     _id_counter: Any = field(default_factory=lambda: itertools.count(1))
 
     # -- lifecycle ------------------------------------------------------------
@@ -109,6 +221,7 @@ class McpClient:
         try:
             self._do_initialize(self.config.transport)
         except Exception as primary_exc:  # noqa: BLE001
+            self._teardown_sse()  # drop any half-open stream before retrying
             if self.config.fallback is None:
                 raise McpError(
                     f"MCP connect to {self.config.name!r} failed: {primary_exc}"
@@ -116,6 +229,7 @@ class McpClient:
             try:
                 self._do_initialize(self.config.fallback)
             except Exception as fallback_exc:  # noqa: BLE001
+                self._teardown_sse()
                 raise McpError(
                     f"MCP connect to {self.config.name!r} failed on both "
                     f"{self.config.transport.value} ({primary_exc}) and "
@@ -123,7 +237,30 @@ class McpClient:
                 ) from fallback_exc
         self._connected = True
 
+    def _open_sse_if_needed(self, transport: Transport) -> None:
+        """For classic SSE (and no injected poster), open the GET stream once."""
+        if transport is not Transport.SSE or self.poster is not None:
+            return
+        if self._sse is not None:
+            return
+        session = _SseSession(
+            self.config.url, dict(self.config.headers), self.config.timeout
+        )
+        session.open()
+        self._sse = session
+
+    def _teardown_sse(self) -> None:
+        if self._sse is not None:
+            self._sse.close()
+            self._sse = None
+
+    def close(self) -> None:
+        """Release any open SSE stream. Safe to call repeatedly."""
+        self._teardown_sse()
+        self._connected = False
+
     def _do_initialize(self, transport: Transport) -> None:
+        self._open_sse_if_needed(transport)
         result = self._rpc(
             "initialize",
             {
@@ -200,6 +337,10 @@ class McpClient:
         """POST a JSON-RPC envelope; parse JSON or SSE-framed JSON back to a dict."""
         if self.poster is not None:
             return self.poster(self.config.url, request, dict(self.config.headers), transport)
+
+        # Classic SSE: route through the persistent GET stream + /messages POST.
+        if transport is Transport.SSE and self._sse is not None:
+            return self._sse.request(request)
 
         headers = {"Content-Type": "application/json", **self.config.headers}
         # Streamable HTTP and SSE both accept event-stream responses.
