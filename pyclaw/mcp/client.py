@@ -45,6 +45,36 @@ class McpServerConfig:
     headers: dict[str, str] = field(default_factory=dict)
     fallback: Transport | None = Transport.SSE  # try this if primary fails
     timeout: float = 30.0
+    # EliteClaw namespaces each server's tools (e.g. "db_", "rag_") so that
+    # tools from different servers never collide. Empty string = no prefix.
+    tool_prefix: str = ""
+
+
+def detect_transport(url: str) -> Transport:
+    """EliteClaw rule: a URL whose path ends with `/mcp` is Streamable HTTP,
+    everything else defaults to SSE (backward compatible)."""
+    from urllib.parse import urlparse
+
+    path = urlparse(url).path.rstrip("/")
+    if path.endswith("/mcp"):
+        return Transport.STREAMABLE_HTTP
+    return Transport.SSE
+
+
+def parse_transport(value: str | None) -> Transport | None:
+    """Accept both EliteClaw spellings and PyClaw's enum values.
+
+    `sse` -> SSE; `streamable-http`/`streamable_http`/`http` -> STREAMABLE_HTTP.
+    Returns None for empty/unknown so callers can fall back to auto-detect.
+    """
+    if not value:
+        return None
+    v = value.strip().lower().replace("-", "_")
+    if v == "sse":
+        return Transport.SSE
+    if v in ("streamable_http", "http"):
+        return Transport.STREAMABLE_HTTP
+    return None
 
 
 @dataclass
@@ -239,6 +269,136 @@ def load_server_configs(path: Path | None = None) -> list[McpServerConfig]:
                 headers=dict(entry.get("headers", {}) or {}),
                 fallback=Transport(fallback) if fallback else None,
                 timeout=float(entry.get("timeout", 30.0)),
+                tool_prefix=str(entry.get("tool_prefix", entry.get("toolPrefix", "")) or ""),
             )
         )
     return configs
+
+
+def load_server_configs_from_env(
+    env: dict[str, str] | None = None,
+) -> list[McpServerConfig]:
+    """Parse EliteClaw-style MCP config straight from environment variables.
+
+    This reads the exact same `.env` shape EliteClaw uses, so an existing
+    EliteClaw deployment can point PyClaw at its current `.env` with no edits::
+
+        MCP_SERVER_1_URL=http://10.211.55.2:9000
+        MCP_SERVER_1_NAME=mssql
+        MCP_SERVER_1_PREFIX=db_
+        MCP_SERVER_1_TRANSPORT=sse        # optional; auto-detected from URL
+        MCP_SERVER_1_TIMEOUT=60000        # optional; milliseconds (EliteClaw)
+        MCP_SERVER_1_HOST=example.com     # optional; sent as the Host header
+        ...
+        # legacy single-server form (also supported):
+        MCP_SERVER_URL=https://your-server
+        MCP_SERVER_NAME=mssql
+        MCP_TOOL_PREFIX=db_
+
+    Transport rules match EliteClaw: an explicit `*_TRANSPORT` wins, otherwise
+    a URL path ending in `/mcp` is Streamable HTTP and everything else is SSE.
+    Timeouts are read in EliteClaw's milliseconds (falling back to
+    `REQUEST_TIMEOUT`) and converted to PyClaw's seconds. No servers found
+    yields an empty list (MCP is optional); a malformed timeout fails loudly
+    (principle #6).
+    """
+    import os
+
+    e = env if env is not None else dict(os.environ)
+
+    def _timeout_seconds(raw: str | None, default_ms: float) -> float:
+        if raw is None or raw.strip() == "":
+            return default_ms / 1000.0
+        try:
+            return float(raw) / 1000.0
+        except ValueError as exc:
+            raise ValueError(f"invalid MCP timeout {raw!r} (expected milliseconds)") from exc
+
+    default_ms = _timeout_ms(e.get("REQUEST_TIMEOUT"))
+    configs: list[McpServerConfig] = []
+
+    # Numbered form: MCP_SERVER_1_*, MCP_SERVER_2_*, ... (stop at first gap,
+    # mirroring EliteClaw which iterates a fixed range and skips blanks).
+    i = 1
+    misses = 0
+    while misses < 3:  # tolerate a couple of gaps, like EliteClaw's loop
+        url = (e.get(f"MCP_SERVER_{i}_URL") or "").strip()
+        if not url:
+            i += 1
+            misses += 1
+            continue
+        misses = 0
+        transport = parse_transport(e.get(f"MCP_SERVER_{i}_TRANSPORT")) or detect_transport(url)
+        host = (e.get(f"MCP_SERVER_{i}_HOST") or "").strip()
+        configs.append(
+            McpServerConfig(
+                name=(e.get(f"MCP_SERVER_{i}_NAME") or f"server-{i}").strip(),
+                url=url,
+                transport=transport,
+                headers={"Host": host} if host else {},
+                fallback=_other_transport(transport),
+                timeout=_timeout_seconds(e.get(f"MCP_SERVER_{i}_TIMEOUT"), default_ms),
+                tool_prefix=(e.get(f"MCP_SERVER_{i}_PREFIX") or "").strip(),
+            )
+        )
+        i += 1
+
+    # Legacy single-server form.
+    legacy_url = (e.get("MCP_SERVER_URL") or "").strip()
+    if legacy_url:
+        transport = parse_transport(e.get("MCP_SERVER_TRANSPORT")) or detect_transport(legacy_url)
+        configs.append(
+            McpServerConfig(
+                name=(e.get("MCP_SERVER_NAME") or "mcp-server").strip(),
+                url=legacy_url,
+                transport=transport,
+                fallback=_other_transport(transport),
+                timeout=_timeout_seconds(e.get("MCP_SERVER_TIMEOUT"), default_ms),
+                tool_prefix=(e.get("MCP_TOOL_PREFIX") or "").strip(),
+            )
+        )
+    return configs
+
+
+def load_server_configs_from_dotenv(path: Path) -> list[McpServerConfig]:
+    """Read an EliteClaw `.env` FILE and parse its MCP servers.
+
+    Point this at an existing EliteClaw deployment's `.env` to bring its MCP
+    servers into PyClaw unchanged. Only `KEY=VALUE` lines are read; comments
+    (`#`) and blanks are ignored, surrounding quotes are stripped, and a
+    leading `export ` is tolerated. A missing file yields an empty list.
+    """
+    if not path.is_file():
+        return []
+    env: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        if s.startswith("export "):
+            s = s[len("export "):].lstrip()
+        key, _, val = s.partition("=")
+        key = key.strip()
+        val = val.strip()
+        if (val.startswith('"') and val.endswith('"')) or (
+            val.startswith("'") and val.endswith("'")
+        ):
+            val = val[1:-1]
+        if key:
+            env[key] = val
+    return load_server_configs_from_env(env)
+
+
+def _timeout_ms(raw: str | None) -> float:
+    """EliteClaw's default REQUEST_TIMEOUT is 30000 ms."""
+    if raw is None or raw.strip() == "":
+        return 30000.0
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"invalid REQUEST_TIMEOUT {raw!r} (expected milliseconds)") from exc
+
+
+def _other_transport(t: Transport) -> Transport:
+    """The complementary transport to use as fallback."""
+    return Transport.SSE if t is Transport.STREAMABLE_HTTP else Transport.STREAMABLE_HTTP

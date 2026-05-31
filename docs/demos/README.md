@@ -73,6 +73,27 @@ feature matrix ใน [`README.md`](../../README.md) ทุกแถว** โด
 สรุป: ช่องว่างหลักที่ EliteClaw ขาด — **L3 Hook, L5 Plugin, L0 audit/HITL, L1 Memory** —
 ตอนนี้เป็น 🟢 ทั้งหมดใน PyClaw และพิสูจน์ด้วยโค้ดที่รันจริง
 
+## 5. EliteClaw `.env` compatibility — ใช้ config MCP เดิมได้เลย
+
+![EliteClaw .env compat demo](./elite_env_compat.png)
+
+สคริปต์: [`demo_elite_env_compat.py`](../../demo_elite_env_compat.py) · log: [`elite_env_compat_output.log`](./elite_env_compat_output.log)
+
+ตอบคำถาม "เชื่อมต่อ MCP server ด้วย config เดิมของ EliteClaw ได้ไหม": **ได้** — PyClaw
+อ่านไฟล์ `.env` ของ EliteClaw ได้ตรง ๆ โดยไม่ต้องแก้อะไร demo นี้อ่าน
+`/tmp/EliteClaw/.env.example` (ไฟล์ตัวอย่างจริงของ EliteClaw) ได้ครบ **7 servers** ผ่าน 9/9 checks:
+
+- รองรับ env รูปแบบ EliteClaw: `MCP_SERVER_N_URL/NAME/PREFIX/TRANSPORT/TIMEOUT/HOST`
+  + legacy `MCP_SERVER_URL` / `MCP_TOOL_PREFIX`
+- **auto-detect transport** ตามกฎ EliteClaw: URL ลงท้าย `/mcp` → Streamable HTTP, อื่น → SSE
+- explicit `*_TRANSPORT` (รับทั้ง `streamable-http`/`http`/`sse`) ชนะ auto-detect
+- รักษา **tool_prefix** (`db_`, `rag_`, `pdpa_`, ...) ไว้กัน namespace ทูลชนกันข้าม server
+- timeout อ่านเป็น มิลลิวินาที (ตาม EliteClaw) แล้วแปลงเป็นวินาที + ใส่ fallback transport ให้ทุก server
+
+API ที่เพิ่มใน `pyclaw.mcp`:
+`load_server_configs_from_dotenv(path)` · `load_server_configs_from_env(env)` ·
+`detect_transport(url)` · `parse_transport(value)` (ยังคง YAML loader เดิมไว้)
+
 ---
 
 วิธีสร้างภาพใหม่: รัน demo พร้อม `tee` เก็บ log แล้วเรนเดอร์ด้วย

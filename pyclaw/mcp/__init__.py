@@ -6,4 +6,13 @@ transport factory + fallback. PyClaw keeps the same design, configured via
 (where they pass through the Hook engine like any other tool).
 """
 
-from pyclaw.mcp.client import McpClient, McpServerConfig, Transport  # noqa: F401
+from pyclaw.mcp.client import (  # noqa: F401
+    McpClient,
+    McpServerConfig,
+    Transport,
+    detect_transport,
+    load_server_configs,
+    load_server_configs_from_dotenv,
+    load_server_configs_from_env,
+    parse_transport,
+)
