@@ -12,3 +12,6 @@ build/
 
 # runtime state (audit log is generated)
 .agent/logs/*.jsonl
+
+# runtime state (chat sessions are generated)
+.agent/sessions/

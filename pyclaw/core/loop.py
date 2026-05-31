@@ -24,6 +24,8 @@ exception fires the OnError hook before propagating.
 
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import dataclass
 
 from pyclaw.config import SETTINGS
@@ -64,10 +66,24 @@ class AgentLoop:
     max_tool_rounds: int = SETTINGS.max_tool_rounds
     system_prompt: str = "You are PyClaw, a deterministic-first agent."
 
-    def run(self, user_request: str, user: str = "user") -> str:
-        """Run the loop to a final text answer."""
+    def run(self, user_request: str, user: str = "user", on_delta=None,
+            on_tool=None) -> str:
+        """Run the loop to a final text answer.
+
+        If `on_delta` (a callable taking a text chunk) is given, assistant text
+        is streamed to it as it is generated — the "streaming replies" stage of
+        the agentic loop. The returned value is still the complete final answer,
+        so callers that don't stream are unaffected.
+
+        If `on_tool` (a callable) is given, it is invoked around every tool
+        execution so callers can observe the "tool execution" stage live:
+            on_tool("call",   name, {"arguments": args})
+            on_tool("return", name, {"result": result, "seconds": elapsed})
+        It is a pure observer — it never affects control flow (that stays with
+        the permission policy / hooks / HITL, principle #1).
+        """
         try:
-            return self._run(user_request, user)
+            return self._run(user_request, user, on_delta, on_tool)
         except Exception as exc:  # OnError hook, then re-raise (fail loudly, #6)
             self.hooks.fire(
                 HookPayload(event=HookEvent.ON_ERROR, user=user, extra={"error": str(exc)})
@@ -75,10 +91,16 @@ class AgentLoop:
             raise
 
     # -- internals ------------------------------------------------------------
-    def _run(self, user_request: str, user: str) -> str:
+    def _run(self, user_request: str, user: str, on_delta=None, on_tool=None) -> str:
         self.hooks.fire(HookPayload(event=HookEvent.PRE_SESSION, user=user))
 
-        self.context.append(Message(role=Role.SYSTEM, content=self._build_system(user)))
+        # Append the system prompt only when the conversation is empty. In
+        # multi-turn (chat) mode the same context is reused across calls, so a
+        # second SYSTEM message here would duplicate the prompt (and memory /
+        # skills catalog) on every turn. One-shot `run` always starts empty, so
+        # this preserves the existing behaviour while enabling persistent chat.
+        if not self.context.messages:
+            self.context.append(Message(role=Role.SYSTEM, content=self._build_system(user)))
         self.context.append(Message(role=Role.USER, content=user_request))
 
         tool_specs = self.tools.llm_specs()
@@ -87,15 +109,43 @@ class AgentLoop:
             if self.context.maybe_compact():
                 self.hooks.fire(HookPayload(event=HookEvent.POST_COMPACTION, user=user))
 
-            response = self.llm.complete(self._as_llm_messages(), tools=tool_specs)
+            # Stream when the caller asked for it AND the provider supports it;
+            # otherwise fall back to the blocking call (same final result).
+            if on_delta is not None and hasattr(self.llm, "complete_stream"):
+                response = self.llm.complete_stream(
+                    self._as_llm_messages(), tools=tool_specs, on_delta=on_delta
+                )
+            else:
+                response = self.llm.complete(self._as_llm_messages(), tools=tool_specs)
 
             if not response.tool_calls:
-                return self._finalize(response.text, user)
+                # Record the assistant's final reply so it persists in context.
+                # In multi-turn (chat) mode the next turn replays this history,
+                # so without it the agent would forget its own answers. We store
+                # the *finalized* text (post PreResponse hook) so the persisted
+                # history matches exactly what the user saw. (#bug: plain-text
+                # answers were previously never appended.)
+                final = self._finalize(response.text, user)
+                self.context.append(Message(role=Role.ASSISTANT, content=final))
+                return final
 
-            # Record the assistant's tool-call intent in context.
-            self.context.append(Message(role=Role.ASSISTANT, content=response.text))
+            # Record the assistant's tool-call intent in context. We keep the
+            # raw tool_calls in meta so _as_llm_messages can replay them to the
+            # provider in OpenAI format (each tool result must reference its id).
+            self.context.append(
+                Message(
+                    role=Role.ASSISTANT,
+                    content=response.text,
+                    meta={"tool_calls": [
+                        {"id": c.id, "type": "function",
+                         "function": {"name": c.name,
+                                      "arguments": json.dumps(c.arguments)}}
+                        for c in response.tool_calls
+                    ]},
+                )
+            )
             for call in response.tool_calls:
-                output = self._invoke_tool(call, user)
+                output = self._invoke_tool(call, user, on_tool)
                 self.context.append(
                     Message(
                         role=Role.TOOL,
@@ -109,7 +159,7 @@ class AgentLoop:
             "Reached max_tool_rounds without a final answer.", user
         )
 
-    def _invoke_tool(self, call: ToolCall, user: str) -> object:
+    def _invoke_tool(self, call: ToolCall, user: str, on_tool=None) -> object:
         """The single deterministic chokepoint for every tool call."""
         name, args = call.name, dict(call.arguments)
 
@@ -146,8 +196,15 @@ class AgentLoop:
             if decision is not ApprovalDecision.APPROVED:
                 return f"[blocked] approval {decision.value} for {name!r}"
 
-        # Execute the tool.
+        # Execute the tool — notify the observer around dispatch (live trace).
+        if on_tool is not None:
+            on_tool("call", name, {"arguments": args})
+        _t0 = time.perf_counter()
         result = self.tools.dispatch(name, args)
+        if on_tool is not None:
+            on_tool("return", name, {
+                "result": result, "seconds": time.perf_counter() - _t0,
+            })
 
         # L3 — PostToolUse hook (may modify the result / notify).
         post = self.hooks.fire(
@@ -190,4 +247,18 @@ class AgentLoop:
         return "\n\n".join(parts)
 
     def _as_llm_messages(self) -> list[dict[str, object]]:
-        return [{"role": m.role.value, "content": m.content} for m in self.context.messages]
+        """Render context into OpenAI-compatible chat messages.
+
+        Assistant turns that issued tool calls carry their `tool_calls`; tool
+        results carry the matching `tool_call_id` — both required by the API
+        when tools are in play (discovered by running the loop for real).
+        """
+        out: list[dict[str, object]] = []
+        for m in self.context.messages:
+            msg: dict[str, object] = {"role": m.role.value, "content": m.content}
+            if m.role is Role.ASSISTANT and m.meta.get("tool_calls"):
+                msg["tool_calls"] = m.meta["tool_calls"]
+            if m.role is Role.TOOL and m.meta.get("tool_call_id"):
+                msg["tool_call_id"] = m.meta["tool_call_id"]
+            out.append(msg)
+        return out

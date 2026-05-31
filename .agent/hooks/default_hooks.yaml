@@ -1,0 +1,19 @@
+# Default hooks shipped with PyClaw (Layer 3). These are DETERMINISTIC policies
+# — exactly the logic that must NOT live in a prompt (principle #1).
+#
+# Register these into a HookEngine at startup. The targets resolve to the
+# ready-to-use implementations in the `pyclaw_hooks` package.
+hooks:
+  # MVP: block destructive operations + writes to protected paths, every time.
+  - name: block-destructive
+    event: PreToolUse
+    runner: python
+    target: pyclaw_hooks.guards:block_destructive
+    priority: 10
+
+  # Auto-format Python files right after they are edited.
+  - name: autoformat
+    event: PostEdit
+    runner: python
+    target: pyclaw_hooks.format:autoformat
+    priority: 20

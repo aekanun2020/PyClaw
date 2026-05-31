@@ -1,0 +1,32 @@
+==================================================================
+PART 1 — MemoryLoader walks the tree (deterministic, no LLM)
+==================================================================
+Sources merged (global-first -> local-last):
+   - project/AGENT_MEMORY.md
+   - project/service/AGENT_MEMORY.md
+   - project/service/AUTO_MEMORY.md
+
+Checks:
+   global rule present : True
+   @import expanded    : True
+   local scope present : True
+   scope order ok      : True
+   AUTO_MEMORY capped  : 200 lines (<=200) -> True
+
+Merged memory is 2944 chars from 3 files.
+
+==================================================================
+PART 2 — inject memory into a REAL LLM and query memory-only facts
+==================================================================
+Q: What is the project's secret canary string? Reply with just the string.
+A: BLUE-PANGOLIN-42
+   -> canary recalled from imported module: True
+
+Q: In the billing service, is it allowed to log card numbers? Answer yes or no and why in one line.
+A: No, because the billing service is required to never log card numbers.
+   -> local-scope rule honored: True
+
+==================================================================
+RESULT: Layer 1 memory (directory walk + @import + scope + caps) fed a
+real LLM, which answered facts that exist ONLY in memory. PASS.
+==================================================================

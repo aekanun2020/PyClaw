@@ -18,7 +18,7 @@ from __future__ import annotations
 import importlib
 import json
 import subprocess
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any, Protocol
 
@@ -29,9 +29,15 @@ DEFAULT_HOOK_TIMEOUT_SECONDS = 10
 
 
 def _payload_to_dict(payload: HookPayload) -> dict[str, Any]:
-    """Serialise a payload to a plain dict (event enum -> its string value)."""
+    """Serialise a payload to a plain dict for a runner's stdin.
+
+    Includes a spec-compatible `input` alias for `arguments` so hook scripts
+    written against the Claude-style ADK spec (which uses `input`) work
+    unchanged alongside PyClaw's native `arguments` key.
+    """
     data = asdict(payload)
     data["event"] = payload.event.value
+    data["input"] = data.get("arguments", {})  # spec alias
     return data
 
 
@@ -44,14 +50,17 @@ def _result_from_dict(data: dict[str, Any], *, base: HookPayload) -> HookResult:
     BLOCK hook, or the permission layer, enforces hard policy).
     """
     action = HookAction(data.get("action", "allow"))
-    message = data.get("message")
+    # `reason` is the spec's name for the human-readable message.
+    message = data.get("message") or data.get("reason")
     modified_payload: HookPayload | None = None
     if action is HookAction.MODIFY:
         patch = data.get("modified", {}) or {}
+        # Spec uses `modified_input` to mean new tool arguments.
+        new_args = data.get("modified_input", patch.get("arguments", base.arguments))
         modified_payload = HookPayload(
             event=base.event,
             tool=patch.get("tool", base.tool),
-            arguments=patch.get("arguments", base.arguments),
+            arguments=new_args,
             result=patch.get("result", base.result),
             user=patch.get("user", base.user),
             extra=patch.get("extra", base.extra),
@@ -130,20 +139,81 @@ class PythonRunner:
         return result
 
 
+@dataclass
 class HttpRunner:
-    """`target` is a URL. POST payload JSON; response JSON parsed -> HookResult."""
+    """`target` is a URL. POST payload JSON; response JSON parsed -> HookResult.
+
+    A network error or non-2xx is treated as BLOCK (fail-closed) so a flaky
+    policy endpoint cannot silently allow an action. The poster is injectable
+    for testing without real network I/O.
+    """
+
+    timeout: int = DEFAULT_HOOK_TIMEOUT_SECONDS
+    poster: Any = None  # (url, json_body, timeout) -> (status_code, json_dict)
 
     def run(self, target: str, payload: HookPayload) -> HookResult:
-        # TODO: httpx.post(target, json=payload, timeout=...) -> HookResult
-        raise NotImplementedError("HttpRunner.run (scaffold)")
+        body = _payload_to_dict(payload)
+        try:
+            if self.poster is not None:
+                status, data = self.poster(target, body, self.timeout)
+            else:
+                import httpx
+
+                resp = httpx.post(target, json=body, timeout=self.timeout)
+                status = resp.status_code
+                data = resp.json() if resp.content else {}
+        except Exception as exc:  # noqa: BLE001 - network failure -> fail-closed
+            return HookResult(action=HookAction.BLOCK, message=f"hook HTTP error: {exc}")
+
+        if status >= 400:
+            return HookResult(action=HookAction.BLOCK, message=f"hook HTTP {status}")
+        if not isinstance(data, dict):
+            return HookResult(action=HookAction.ALLOW)
+        return _result_from_dict(data, base=payload)
 
 
+@dataclass
 class LlmRunner:
-    """`target` is a prompt template. ADVISORY ONLY — never a hard constraint."""
+    """`target` is a prompt template. ADVISORY ONLY — never a hard constraint.
+
+    Because hosted LLM inference is non-deterministic (see core/llm docstring),
+    this runner may only ever produce ALLOW or NOTIFY — it can flag a concern
+    but can NEVER block or modify (that would put policy in a prompt, violating
+    principle #1). A BLOCK/MODIFY classification is downgraded to NOTIFY.
+
+    The provider is injectable so tests run without a live model.
+    """
+
+    provider: Any = None  # object with .complete(messages) -> obj with .text
 
     def run(self, target: str, payload: HookPayload) -> HookResult:
-        # TODO: call LLM provider; map classification -> HookResult (ALLOW/NOTIFY only)
-        raise NotImplementedError("LlmRunner.run (scaffold)")
+        provider = self.provider
+        if provider is None:
+            from pyclaw.core.llm import OpenRouterProvider
+
+            provider = OpenRouterProvider()
+
+        prompt = target.format(
+            event=payload.event.value,
+            tool=payload.tool or "",
+            arguments=json.dumps(payload.arguments),
+        )
+        messages = [
+            {"role": "system", "content":
+                "You are an advisory policy classifier. Reply with a single word: "
+                "ALLOW or NOTIFY. Use NOTIFY only to raise a soft concern. "
+                "You cannot block."},
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            text = (provider.complete(messages).text or "").strip().upper()
+        except Exception as exc:  # noqa: BLE001 - advisory only: never block on error
+            return HookResult(action=HookAction.ALLOW, message=f"llm hook skipped: {exc}")
+
+        if text.startswith("NOTIFY"):
+            return HookResult(action=HookAction.NOTIFY, message=text)
+        # Anything else (incl. an attempted BLOCK/MODIFY) is downgraded to ALLOW.
+        return HookResult(action=HookAction.ALLOW)
 
 
 RUNNERS: dict[RunnerType, HookRunner] = {

@@ -1,0 +1,73 @@
+[1mPyClaw Feature Matrix — live proof vs EliteClaw source[0m
+[2mEliteClaw: /tmp/EliteClaw (TypeScript v7) · PyClaw: /tmp/PyClaw (Python)[0m
+
+[1m[96m────────────────────────────────────────────────────────────────────────[0m
+[1mL0 Runtime 🟡→🟢 — context mgmt + audit log + HITL approval[0m
+[96m────────────────────────────────────────────────────────────────────────[0m
+  [[92mPASS[0m] EliteClaw has NO audit log (grep 'audit' -> empty)
+  [[92mPASS[0m] EliteClaw has NO HITL/approval (grep 'approval' -> empty)
+  [[92mPASS[0m] PyClaw audit writes a hashed JSONL record  [2minput_hash=sha256:2de281bd8e554898…[0m
+  [[92mPASS[0m] PyClaw HITL fail-closed: timeout -> TIMED_OUT (not approved)  [2mtimed_out[0m
+  [[92mPASS[0m] PyClaw context estimates tokens (compaction trigger)  [2m~25 tok[0m
+
+[1m[96m────────────────────────────────────────────────────────────────────────[0m
+[1mL1 Memory 🟡→🟢 — hierarchy + @import + auto-memory (EliteClaw had none)[0m
+[96m────────────────────────────────────────────────────────────────────────[0m
+  [[92mPASS[0m] EliteClaw has NO memory layer (no AGENT_MEMORY/@import)
+  [[92mPASS[0m] global-first → local-last ordering
+  [[92mPASS[0m] @import expanded (marker gone, content pulled)
+  [[92mPASS[0m] CLAUDE.md alias recognised (principle #7)
+  [[92mPASS[0m] auto-memory cap constant present  [2m200 lines[0m
+
+[1m[96m────────────────────────────────────────────────────────────────────────[0m
+[1mL2 Skill 🟡→🟢 — lazy load + auto-detect + chaining (EliteClaw: frontmatter only)[0m
+[96m────────────────────────────────────────────────────────────────────────[0m
+  [[92mPASS[0m] EliteClaw skill-loader has NO auto-detect/chaining
+  [[92mPASS[0m] PyClaw lazy: catalog (frontmatter) << full SKILL.md body  [2mcatalog 94B < skill 1293B[0m
+  [[92mPASS[0m] PyClaw auto-detect matches a skill by keyword overlap  [2mcode-review[0m
+
+[1m[96m────────────────────────────────────────────────────────────────────────[0m
+[1mL3 Hook ★ 🔴→🟢 — 8 events + allow/modify/block/notify  (EliteClaw: NONE)[0m
+[96m────────────────────────────────────────────────────────────────────────[0m
+  [[92mPASS[0m] EliteClaw has NO hook lifecycle (no PreToolUse/PostToolUse engine)
+  [[92mPASS[0m] PyClaw defines all 8 ADK hook events  [2mPreToolUse, PostToolUse, PostEdit, PreSession, PostCompaction, OnError, PreSubagentSpawn, PreResponse[0m
+  [[92mPASS[0m] PyClaw defines 4 actions (allow/modify/block/notify)  [2mallow, modify, block, notify[0m
+  [[92mPASS[0m] PyClaw hook BLOCKs write to secrets/ deterministically (Prompt≠Policy #1)  [2mprotected path(s) ['secrets/x.key', 'secrets/x.key'] may not be modified by 'write_file'[0m
+
+[1m[96m────────────────────────────────────────────────────────────────────────[0m
+[1mL4 Subagent 🟢→🟢 — inherit-then-restrict + PARALLEL team (EliteClaw: sequential)[0m
+[96m────────────────────────────────────────────────────────────────────────[0m
+  [[92mPASS[0m] inherit-then-restrict: EXPLORE loses write_file/delete_file  [2m('read_file',)[0m
+  [[92mPASS[0m] no nested spawning (principle #3): is_nested -> refused  [2mnested subagent spawning is forbidden (principle #3)[0m
+  [[92mPASS[0m] PARALLEL: 3×0.2s subagents finish < 0.45s (concurrent, not 0.6s serial)  [2m0.20s[0m
+  [[92mPASS[0m] results order-preserved + summary-only
+
+[1m[96m────────────────────────────────────────────────────────────────────────[0m
+[1mL5 Plugin 🔴→🟢 — plugin.yaml + permissions.yaml + versioning  (EliteClaw: NONE)[0m
+[96m────────────────────────────────────────────────────────────────────────[0m
+  [[92mPASS[0m] EliteClaw has NO ADK plugin layer (plugin.yaml/permissions.yaml)
+  [[92mPASS[0m] plugin.yaml discovered + parsed (name/version)  [2mguard v1.2.0[0m
+  [[92mPASS[0m] permissions.yaml -> policy blocks deploy_to_production
+  [[92mPASS[0m] plugin hook registered into engine
+  [[92mPASS[0m] versioning: unmet 'requires' fails loudly (principle #6)
+
+[1m[96m────────────────────────────────────────────────────────────────────────[0m
+[1mMCP 🟢→🟢 — JSON-RPC client + transport fallback (both have it)[0m
+[96m────────────────────────────────────────────────────────────────────────[0m
+  [[92mPASS[0m] EliteClaw also has MCP clients (parity, both 🟢)
+  [[92mPASS[0m] PyClaw MCP: primary fails -> falls back to SSE, then lists tools
+
+[1m[96m────────────────────────────────────────────────────────────────────────[0m
+[1mCross-cutting — 'Prompt ≠ Policy' wired into the core loop (principle #1)[0m
+[96m────────────────────────────────────────────────────────────────────────[0m
+  [[92mPASS[0m] loop checks permission BEFORE executing any tool
+  [[92mPASS[0m] loop fires PreToolUse hook BEFORE executing any tool
+  [[92mPASS[0m] loop audits every tool call (observability, L0)
+
+[1m[96m========================================================================[0m
+[1mSUMMARY[0m
+[96m========================================================================[0m
+
+  [92m31/31 live checks passed[0m
+  Every README feature-matrix row verified against REAL code.
+  Gaps EliteClaw lacked (L3 Hook, L5 Plugin, L0 audit/HITL, L1 Memory) now 🟢.

@@ -28,13 +28,42 @@ class PermissionPolicy:
 
     @classmethod
     def from_yaml(cls, path: Path) -> "PermissionPolicy":
-        """Parse permissions.yaml.
+        """Parse a permissions.yaml file into a PermissionPolicy.
 
-        TODO:
-          - yaml.safe_load(path)
-          - return cls(allowed_tools=frozenset(...), blocked_tools=frozenset(...))
+        Expected shape (both keys optional)::
+
+            allowed_tools: [read_file, write_file]
+            blocked_tools: [deploy_to_production]
+
+        A missing file yields an empty (permit-anything-not-blocked) policy so a
+        plugin without explicit permissions is still loadable. A malformed file
+        (non-mapping, or a list where a list isn't expected) fails loudly
+        (principle #6) rather than silently widening access.
         """
-        raise NotImplementedError("PermissionPolicy.from_yaml (scaffold)")
+        import yaml
+
+        if not path.is_file():
+            return cls()
+
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"{path}: permissions.yaml must be a mapping, got {type(raw).__name__} "
+                "(fail loudly, principle #6)"
+            )
+
+        def _as_set(key: str) -> frozenset[str]:
+            value = raw.get(key, []) or []
+            if isinstance(value, str):
+                value = [value]
+            if not isinstance(value, (list, tuple)):
+                raise ValueError(f"{path}: {key} must be a list, got {type(value).__name__}")
+            return frozenset(str(v) for v in value)
+
+        return cls(
+            allowed_tools=_as_set("allowed_tools"),
+            blocked_tools=_as_set("blocked_tools"),
+        )
 
     def merge(self, other: "PermissionPolicy") -> "PermissionPolicy":
         """Combine two policies (e.g. global + plugin). blocked is unioned."""

@@ -14,6 +14,12 @@ from pathlib import Path
 try:
     from dotenv import load_dotenv
 
+    # Honour an explicit EliteClaw/OpenClaw .env via PYCLAW_DOTENV first (so
+    # pointing PyClaw at an existing deployment's .env brings over not just MCP
+    # servers but also OPENROUTER_* settings), then fall back to ./.env.
+    _dotenv_override = os.getenv("PYCLAW_DOTENV")
+    if _dotenv_override:
+        load_dotenv(_dotenv_override)
     load_dotenv()
 except Exception:  # pragma: no cover - dotenv optional at import time
     pass
@@ -42,8 +48,14 @@ class Settings:
     openrouter_base_url: str = field(
         default_factory=lambda: os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     )
+    # Model: PyClaw's own override wins, then EliteClaw/OpenClaw's OPENROUTER_MODEL
+    # (used verbatim in their .env files), then a hosted default.
     default_model: str = field(
-        default_factory=lambda: os.getenv("PYCLAW_DEFAULT_MODEL", "anthropic/claude-3.7-sonnet")
+        default_factory=lambda: (
+            os.getenv("PYCLAW_DEFAULT_MODEL")
+            or os.getenv("OPENROUTER_MODEL")
+            or "anthropic/claude-3.7-sonnet"
+        )
     )
 
     # Runtime (Layer 0)

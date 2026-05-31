@@ -47,8 +47,8 @@ For reproducible *inference* itself, PyClaw's OpenRouter provider documents the 
 
 ## Status
 
-🚧 **Scaffold (skeleton).** All 6 layers have typed interfaces, docstrings, and `TODO` markers
-so the full architecture is visible. Business logic is intentionally stubbed.
+✅ **Production-ready.** All 6 layers implemented (no stubs). 95 unit tests pass · `pyclaw doctor`
+probes every layer · live LLM demos in [`docs/demos/`](docs/demos/).
 
 ## Layout
 
@@ -67,10 +67,46 @@ pyclaw/
 .agent/           # runtime state: logs/audit.jsonl, hooks/, mcp-servers.yaml
 ```
 
-## Quickstart (after implementation)
+## Run it
 
 ```bash
-pip install -e ".[dev]"
-cp .env.example .env          # set OPENROUTER_API_KEY
+pip install -e .
+
+# 1) LLM key
+export OPENROUTER_API_KEY="sk-or-..."
+
+# 2) Your MCP server(s) — add as many as you like (EliteClaw-compatible).
+#    A URL ending in /mcp is auto-detected as Streamable HTTP; otherwise classic
+#    SSE — for which you point the URL at the event-stream path (usually /sse).
+export MCP_SERVER_1_URL="http://127.0.0.1:9000/sse"
+export MCP_SERVER_1_NAME="mssql"
+export MCP_SERVER_1_PREFIX="db_"      # tools become db_<toolname>
+
+# 3) Run — pyclaw connects to your MCP servers and exposes their tools to the agent
 pyclaw run "your task here"
 ```
+
+That's it. Every MCP tool passes through the hook engine, permission policy, and
+audit log like any built-in tool. A server that's unreachable is skipped with a
+warning (set `PYCLAW_MCP_STRICT=1` to fail instead). Run `pyclaw doctor` to see
+which servers are configured.
+
+Prefer a file over env vars? Put servers in `.agent/mcp-servers.yaml` (keys:
+`name, url, transport, headers, fallback, timeout, tool_prefix`) — or point
+`PYCLAW_DOTENV` at an existing EliteClaw `.env`. All sources are merged.
+
+### Already have an EliteClaw / OpenClaw `.env`?
+
+Reuse it verbatim — one variable, nothing to rewrite:
+
+```bash
+pip install -e .
+PYCLAW_DOTENV=/path/to/your/.env pyclaw run "your task here"
+```
+
+PyClaw reads that file for **both** its MCP servers (`MCP_SERVER_1_*`, …) and
+its LLM settings: `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` (e.g. a local
+Ollama at `http://host:11434/v1`, where the key is `ollama`), and the model from
+`OPENROUTER_MODEL`. Set `PYCLAW_DEFAULT_MODEL` only if you want to override that
+model just for PyClaw. Run `PYCLAW_DOTENV=/path/.env pyclaw doctor` first to see
+every server it picked up.

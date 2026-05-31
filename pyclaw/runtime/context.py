@@ -34,6 +34,18 @@ class Message:
     # opaque metadata: tool_call_id, token estimate, pinned flag, etc.
     meta: dict[str, object] = field(default_factory=dict)
 
+    def to_dict(self) -> dict[str, object]:
+        """JSON-serialisable form (for session persistence)."""
+        return {"role": self.role.value, "content": self.content, "meta": self.meta}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> "Message":
+        return cls(
+            role=Role(data["role"]),
+            content=str(data.get("content", "")),
+            meta=dict(data.get("meta") or {}),
+        )
+
 
 class CompactionStrategy(Protocol):
     """Pluggable strategy. Returns the new (possibly shorter) message list."""
@@ -79,3 +91,12 @@ class ContextManager:
         new = self.strategy.compact(self._messages, self.token_budget)
         self._messages = list(new)
         return True
+
+    # -- persistence ----------------------------------------------------------
+    def to_list(self) -> list[dict[str, object]]:
+        """Serialise the whole history to a list of JSON-able dicts."""
+        return [m.to_dict() for m in self._messages]
+
+    def load_messages(self, items: list[dict[str, object]]) -> None:
+        """Replace the history from a previously-serialised list (resume)."""
+        self._messages = [Message.from_dict(d) for d in items]

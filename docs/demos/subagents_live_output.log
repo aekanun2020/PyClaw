@@ -1,0 +1,33 @@
+====================================================================
+DEMO — Layer 4 subagent delegation against the REAL OpenRouter LLM
+====================================================================
+
+Resolved tool sets (inherit-then-restrict):
+  explore  -> ('read_file',)
+  plan     -> ('read_file',)
+  general  -> ('read_file', 'write_file')
+
+Running 3 subagents in parallel...
+
+[explore ] ok=True
+            summary: PyClaw is a deterministic‑first agent runtime built with six layers.
+[plan    ] ok=True
+            summary: Implement a strict sandbox environment for each runtime layer to isolate and validate all agent code execution.
+[general ] ok=True
+            summary: One-word tag written: deterministic.
+
+--------------------------------------------------------------------
+>>> PASS: EXPLORE/PLAN cannot write (write_file removed); no spawn tool anywhere
+>>> PASS: EXPLORE subagent performed NO write (permission policy held)
+>>> PASS: all 3 isolated loops returned ONLY a summary (no transcript leaked)
+
+====================================================================
+PreSubagentSpawn hook BLOCK — delegation policy is code, not a prompt
+====================================================================
+spawn(EXPLORE) -> ok=False, error=blocked by PreSubagentSpawn hook: explore delegation denied
+>>> PASS: hook blocked the spawn deterministically (LLM never ran)
+
+====================================================================
+RESULT: parallel subagent delegation works on the real LLM, with
+isolation (#2), no-nesting (#3), and code-enforced policy (#1) all holding.
+====================================================================

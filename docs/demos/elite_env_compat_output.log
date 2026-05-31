@@ -1,0 +1,28 @@
+[1mDEMO — PyClaw reads EliteClaw's OWN .env (no edits)[0m
+[2msource: /tmp/EliteClaw/.env.example[0m
+[2m------------------------------------------------------------------------------[0m
+parsed [1m7[0m MCP servers from EliteClaw .env
+
+[96m  name              transport         prefix        timeout  url[0m
+  mssql             sse               db_           30       http://10.211.55.2:9000
+  rag               sse               rag_          30       http://10.211.55.2:8000
+  pdpa              streamable_http   pdpa_         30       http://10.211.55.2:8100/mcp
+  apify             streamable_http   apify_        30       http://10.211.55.2:3000/mcp
+  mssqlwriter       sse               mssqlwriter_  30       http://10.211.55.2:9001
+  google-workspace  streamable_http   gws_          30       http://10.211.55.2:8080/mcp
+  office            streamable_http   office_       30       http://10.211.55.2:8200/mcp
+[2m------------------------------------------------------------------------------[0m
+[2m------------------------------------------------------------------------------[0m
+[92m[PASS][0m all 7 active servers parsed (got 7)
+[92m[PASS][0m names + order preserved: ['mssql', 'rag', 'pdpa', 'apify', 'mssqlwriter', 'google-workspace', 'office']
+[92m[PASS][0m mssql auto-detected SSE (no /mcp in URL)
+[92m[PASS][0m pdpa auto-detected Streamable HTTP (URL ends /mcp)
+[92m[PASS][0m google-workspace honours explicit *_TRANSPORT=streamable-http
+[92m[PASS][0m mssql prefix 'db_' preserved
+[92m[PASS][0m rag prefix 'rag_' preserved
+[92m[PASS][0m pdpa prefix 'pdpa_' preserved
+[92m[PASS][0m every server has a complementary fallback transport
+[2m------------------------------------------------------------------------------[0m
+[1m9/9 checks passed[0m
+EliteClaw's existing .env drives PyClaw's MCP layer unchanged.
+transport auto-detect, explicit override, tool prefixes, fallback — all honoured.

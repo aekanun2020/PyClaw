@@ -6,23 +6,40 @@ keeps that and adds auto-detection + chaining.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
-from pyclaw.skills.registry import SkillMeta, SkillRegistry
+from pyclaw.skills.registry import Invocation, SkillMeta, SkillRegistry, parse_frontmatter
+
+_WORD = re.compile(r"[a-z0-9]+")
+
+
+def _keywords(text: str) -> set[str]:
+    return set(_WORD.findall(text.lower()))
 
 
 @dataclass
 class SkillLoader:
     registry: SkillRegistry
 
-    def detect(self, user_request: str) -> list[SkillMeta]:
-        """Auto-detect which AUTO skills match the request (semantic matching).
+    def detect(self, user_request: str, *, min_overlap: int = 1) -> list[SkillMeta]:
+        """Auto-detect which AUTO skills match the request.
 
-        TODO:
-          - embed/keyword-match user_request against each SkillMeta.description
-          - return ranked matches above a threshold (invocation == AUTO only)
+        Lightweight keyword overlap between the request and each skill's
+        name+description. Deterministic and dependency-free; swap in embeddings
+        later without changing callers. Returns AUTO skills ranked by overlap
+        (descending), ties broken by name for stable ordering.
         """
-        raise NotImplementedError("SkillLoader.detect (scaffold)")
+        req = _keywords(user_request)
+        scored: list[tuple[int, str, SkillMeta]] = []
+        for meta in self.registry.all():
+            if meta.invocation is not Invocation.AUTO:
+                continue
+            overlap = len(req & _keywords(f"{meta.name} {meta.description}"))
+            if overlap >= min_overlap:
+                scored.append((overlap, meta.name, meta))
+        scored.sort(key=lambda t: (-t[0], t[1]))
+        return [meta for _, _, meta in scored]
 
     def resolve_manual(self, command: str) -> SkillMeta | None:
         """Map a '/skill-name' command to its SkillMeta (MANUAL or AUTO)."""
@@ -30,18 +47,28 @@ class SkillLoader:
         return self.registry.get(name)
 
     def load_full(self, meta: SkillMeta) -> str:
-        """Read the full SKILL.md body (instructions) for injection.
+        """Read the full SKILL.md body (instructions), stripping frontmatter.
 
-        TODO:
-          - read meta.path, strip frontmatter, return the instruction body
+        This is the on-demand heavy load (principle #2) — only called once a
+        skill is actually selected.
         """
-        raise NotImplementedError("SkillLoader.load_full (scaffold)")
+        _, body = parse_frontmatter(meta.path.read_text(encoding="utf-8"))
+        return body
 
     def expand_chain(self, meta: SkillMeta, seen: set[str] | None = None) -> list[SkillMeta]:
-        """Resolve `chains_to` follow-on skills (cycle-guarded).
+        """Resolve `chains_to` follow-on skills via DFS, cycle-guarded.
 
-        TODO:
-          - DFS over meta.chains_to via registry.get, guard cycles with `seen`
-          - return ordered list of chained SkillMeta
+        Returns the chained skills in order (not including `meta` itself).
         """
-        raise NotImplementedError("SkillLoader.expand_chain (scaffold)")
+        seen = seen if seen is not None else set()
+        seen.add(meta.name)
+        ordered: list[SkillMeta] = []
+        for nxt_name in meta.chains_to:
+            if nxt_name in seen:
+                continue
+            nxt = self.registry.get(nxt_name)
+            if nxt is None:
+                continue
+            ordered.append(nxt)
+            ordered.extend(self.expand_chain(nxt, seen))
+        return ordered
