@@ -24,6 +24,7 @@ exception fires the OnError hook before propagating.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from pyclaw.config import SETTINGS
@@ -92,8 +93,21 @@ class AgentLoop:
             if not response.tool_calls:
                 return self._finalize(response.text, user)
 
-            # Record the assistant's tool-call intent in context.
-            self.context.append(Message(role=Role.ASSISTANT, content=response.text))
+            # Record the assistant's tool-call intent in context. We keep the
+            # raw tool_calls in meta so _as_llm_messages can replay them to the
+            # provider in OpenAI format (each tool result must reference its id).
+            self.context.append(
+                Message(
+                    role=Role.ASSISTANT,
+                    content=response.text,
+                    meta={"tool_calls": [
+                        {"id": c.id, "type": "function",
+                         "function": {"name": c.name,
+                                      "arguments": json.dumps(c.arguments)}}
+                        for c in response.tool_calls
+                    ]},
+                )
+            )
             for call in response.tool_calls:
                 output = self._invoke_tool(call, user)
                 self.context.append(
@@ -190,4 +204,18 @@ class AgentLoop:
         return "\n\n".join(parts)
 
     def _as_llm_messages(self) -> list[dict[str, object]]:
-        return [{"role": m.role.value, "content": m.content} for m in self.context.messages]
+        """Render context into OpenAI-compatible chat messages.
+
+        Assistant turns that issued tool calls carry their `tool_calls`; tool
+        results carry the matching `tool_call_id` — both required by the API
+        when tools are in play (discovered by running the loop for real).
+        """
+        out: list[dict[str, object]] = []
+        for m in self.context.messages:
+            msg: dict[str, object] = {"role": m.role.value, "content": m.content}
+            if m.role is Role.ASSISTANT and m.meta.get("tool_calls"):
+                msg["tool_calls"] = m.meta["tool_calls"]
+            if m.role is Role.TOOL and m.meta.get("tool_call_id"):
+                msg["tool_call_id"] = m.meta["tool_call_id"]
+            out.append(msg)
+        return out
