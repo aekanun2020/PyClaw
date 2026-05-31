@@ -47,8 +47,8 @@ For reproducible *inference* itself, PyClaw's OpenRouter provider documents the 
 
 ## Status
 
-🚧 **Scaffold (skeleton).** All 6 layers have typed interfaces, docstrings, and `TODO` markers
-so the full architecture is visible. Business logic is intentionally stubbed.
+✅ **Production-ready.** All 6 layers implemented (no stubs). 95 unit tests pass · `pyclaw doctor`
+probes every layer · live LLM demos in [`docs/demos/`](docs/demos/).
 
 ## Layout
 
@@ -67,10 +67,12 @@ pyclaw/
 .agent/           # runtime state: logs/audit.jsonl, hooks/, mcp-servers.yaml
 ```
 
-## Quickstart (after implementation)
+## Run it
 
 ```bash
-pip install -e ".[dev]"
-cp .env.example .env          # set OPENROUTER_API_KEY
+pip install -e .
+export OPENROUTER_API_KEY="sk-or-..."     # your OpenRouter key
 pyclaw run "your task here"
 ```
+
+That's it. To sanity-check every layer first, run `pyclaw doctor`.
