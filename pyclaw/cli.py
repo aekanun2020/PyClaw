@@ -64,7 +64,8 @@ def _mount_mcp(registry) -> list:
 
 
 # -- shared assembly ----------------------------------------------------------
-def _build_loop(*, with_memory: bool = True, with_skills: bool = True, with_mcp: bool = True):
+def _build_loop(*, with_memory: bool = True, with_skills: bool = True,
+                with_mcp: bool = True, with_subagents: bool = False):
     """Assemble a fully-wired AgentLoop from config/.agent. Returns the loop.
 
     Wiring (all 6 layers):
@@ -116,6 +117,12 @@ def _build_loop(*, with_memory: bool = True, with_skills: bool = True, with_mcp:
     tools = ToolRegistry()
     # MCP — register every configured server's tools (your primary surface).
     mounted = _mount_mcp(tools) if with_mcp else []
+
+    # L4 — optionally expose delegation as a `spawn_subagent` tool. Done AFTER
+    # MCP mount so subagents inherit the same MCP tools (inherit-then-restrict).
+    if with_subagents:
+        from pyclaw.subagents.tool import register_spawn_subagent_tool
+        register_spawn_subagent_tool(tools, hooks=hooks)
 
     loop = AgentLoop(
         llm=OpenRouterProvider(),
@@ -183,7 +190,7 @@ def _make_tool_tracer(write=None):
 
 
 def _cmd_chat(resume: str | None = None, no_stream: bool = False,
-              trace: bool = False) -> int:
+              trace: bool = False, subagents: bool = False) -> int:
     """Interactive multi-turn chat (EliteClaw-style), completing the agentic loop.
 
     The OpenClaw definition of an agentic loop is:
@@ -211,7 +218,7 @@ def _cmd_chat(resume: str | None = None, no_stream: bool = False,
     from pyclaw.runtime.session import SessionStore
 
     # Build once: this is where MCP servers are dialed and tools registered.
-    loop = _build_loop()
+    loop = _build_loop(with_subagents=subagents)
     mounted = getattr(loop, "_mcp_mounted", [])
     for m in mounted:
         sys.stderr.write(
@@ -237,6 +244,7 @@ def _cmd_chat(resume: str | None = None, no_stream: bool = False,
     sys.stderr.write(
         "\nPyClaw chat — multi-turn, history preserved + persisted across turns.\n"
         f"  streaming: {'on' if stream else 'off'}   trace: {'on' if trace else 'off'}"
+        f"   subagents: {'on' if subagents else 'off'}"
         f"   session saved to: {store.root}/{session_id}.json\n"
         "Type your request and press Enter. Commands: 'quit' / 'exit' to leave.\n\n"
     )
@@ -377,6 +385,11 @@ def main(argv: list[str] | None = None) -> int:
         "--trace", action="store_true",
         help="show live tool calls + arguments + results (verbose; may reveal PII)",
     )
+    chat_p.add_argument(
+        "--subagents", action="store_true",
+        help="enable the spawn_subagent tool so the agent can delegate work "
+             "to isolated subagents, including parallel teams (extra LLM cost)",
+    )
 
     sub.add_parser("doctor", help="check config, .agent layout, and layer wiring")
 
@@ -385,7 +398,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         return _cmd_run(args.task)
     if args.command == "chat":
-        return _cmd_chat(resume=args.resume, no_stream=args.no_stream, trace=args.trace)
+        return _cmd_chat(resume=args.resume, no_stream=args.no_stream,
+                         trace=args.trace, subagents=args.subagents)
     if args.command == "doctor":
         return _cmd_doctor()
     return 0
