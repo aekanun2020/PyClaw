@@ -29,9 +29,15 @@ DEFAULT_HOOK_TIMEOUT_SECONDS = 10
 
 
 def _payload_to_dict(payload: HookPayload) -> dict[str, Any]:
-    """Serialise a payload to a plain dict (event enum -> its string value)."""
+    """Serialise a payload to a plain dict for a runner's stdin.
+
+    Includes a spec-compatible `input` alias for `arguments` so hook scripts
+    written against the Claude-style ADK spec (which uses `input`) work
+    unchanged alongside PyClaw's native `arguments` key.
+    """
     data = asdict(payload)
     data["event"] = payload.event.value
+    data["input"] = data.get("arguments", {})  # spec alias
     return data
 
 
@@ -44,14 +50,17 @@ def _result_from_dict(data: dict[str, Any], *, base: HookPayload) -> HookResult:
     BLOCK hook, or the permission layer, enforces hard policy).
     """
     action = HookAction(data.get("action", "allow"))
-    message = data.get("message")
+    # `reason` is the spec's name for the human-readable message.
+    message = data.get("message") or data.get("reason")
     modified_payload: HookPayload | None = None
     if action is HookAction.MODIFY:
         patch = data.get("modified", {}) or {}
+        # Spec uses `modified_input` to mean new tool arguments.
+        new_args = data.get("modified_input", patch.get("arguments", base.arguments))
         modified_payload = HookPayload(
             event=base.event,
             tool=patch.get("tool", base.tool),
-            arguments=patch.get("arguments", base.arguments),
+            arguments=new_args,
             result=patch.get("result", base.result),
             user=patch.get("user", base.user),
             extra=patch.get("extra", base.extra),
