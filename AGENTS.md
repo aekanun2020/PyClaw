@@ -15,6 +15,15 @@ Each agent is one frontmatter block. Recognised keys:
                     listed prefix (e.g. `db_` matches `db_execute_query_tool`).
                     The orchestrator resolves these against the live tool
                     registry, so the agent only ever receives REAL callables.
+  - `home`        : OPTIONAL override for where the agent's persona files live.
+                    By default each agent's home is `agents/<name>/` (next to
+                    this file). That folder may hold `SOUL.md` (persona +
+                    boundaries) and `TOOLS.md` (tool-usage rules); when present
+                    they are composed — with the anti-hallucination guardrail
+                    appended — into the routed agent's OWN system prompt. Both
+                    files are OPTIONAL: if absent, the agent falls back to the
+                    generic subagent prompt (no breakage). The tool allowlist
+                    above stays in force regardless (defence in depth).
 
 Backward-compat note: this file is config only. With `--orchestrator` OFF (the
 default) nothing here is loaded, so the flat chat loop is unaffected.

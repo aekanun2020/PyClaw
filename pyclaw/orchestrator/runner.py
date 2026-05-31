@@ -40,7 +40,11 @@ from dataclasses import dataclass
 
 from pyclaw.hooks import HookEngine
 from pyclaw.orchestrator.registry import AgentRegistry, AgentSpec
-from pyclaw.subagents.runner import SubagentRunner, _label_on_tool
+from pyclaw.subagents.runner import (
+    SUBAGENT_GUARDRAIL,
+    SubagentRunner,
+    _label_on_tool,
+)
 from pyclaw.subagents.types import SubagentSpec, SubagentType
 
 
@@ -91,9 +95,19 @@ class OrchestratorRunner:
             max_workers=self.max_workers,
         )
 
-    def _spec_for(self, message: str) -> SubagentSpec:
+    def _spec_for(self, message: str, agent: AgentSpec) -> SubagentSpec:
         # GENERAL so resolve_tools keeps the whole (already-restricted) group.
-        return SubagentSpec(type=SubagentType.GENERAL, objective=message)
+        # Compose the agent's OWN system prompt from SOUL.md + TOOLS.md, with
+        # the anti-hallucination guardrail appended (defence in depth). When the
+        # agent has no SOUL/TOOLS the composer returns None, so the spec carries
+        # system_prompt=None and the isolated loop uses the generic prompt
+        # (backward-compatible fallback — no breakage).
+        system_prompt = agent.compose_system_prompt(guardrail=SUBAGENT_GUARDRAIL)
+        return SubagentSpec(
+            type=SubagentType.GENERAL,
+            objective=message,
+            system_prompt=system_prompt,
+        )
 
     def route_one(self, agent_name: str, message: str, on_tool=None) -> RouteResult:
         """Route a single message to a single named agent (isolated run)."""
@@ -105,7 +119,7 @@ class OrchestratorRunner:
             )
         runner = self._runner_for(agent)
         result = runner.spawn(
-            self._spec_for(message),
+            self._spec_for(message, agent),
             on_tool=_label_on_tool(on_tool, _agent_label(agent_name)),
         )
         return RouteResult(
