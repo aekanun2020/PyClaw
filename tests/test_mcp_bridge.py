@@ -129,3 +129,26 @@ def test_strict_mode_raises_on_dead_server():
     reg = ToolRegistry()
     with pytest.raises(RuntimeError):
         mount_mcp_tools(reg, [bad], client_factory=lambda c: fake, strict=True)
+
+
+def test_strict_mode_mounts_good_then_aggregates_failures():
+    # A dead server must NOT mask a working one: strict mode still mounts the
+    # reachable server, then raises an error that names the dead server.
+    good = _cfg("pdpa", prefix="pdpa_")
+    bad = _cfg("office-creator")
+    fakes = {
+        "pdpa": FakeClient(good, [McpTool(server="pdpa", name="ask", description="")]),
+        "office-creator": FakeClient(bad, [], fail=True),
+    }
+    reg = ToolRegistry()
+    with pytest.raises(RuntimeError) as ei:
+        mount_mcp_tools(
+            reg, [bad, good],
+            client_factory=lambda c: fakes[c.name],
+            strict=True,
+        )
+    # the good server's tools were registered before the aggregated raise
+    assert reg.names() == ["pdpa_ask"]
+    # the error names the dead server, not the healthy one
+    assert "office-creator" in str(ei.value)
+    assert "pdpa" not in str(ei.value)

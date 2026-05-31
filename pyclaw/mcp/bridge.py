@@ -20,6 +20,7 @@ from typing import Any
 from pyclaw.core.tools import Tool, ToolRegistry
 from pyclaw.mcp.client import (
     McpClient,
+    McpError,
     McpServerConfig,
     load_server_configs,
     load_server_configs_from_dotenv,
@@ -82,10 +83,16 @@ def mount_mcp_tools(
     when MCP is your primary surface and you run several servers. Pass
     ``strict=True`` (CLI: ``PYCLAW_MCP_STRICT=1``) to fail loudly instead
     (principle #6). ``on_warn(message)`` receives skip warnings.
+
+    In strict mode every server is still attempted; the failures are then
+    aggregated into a single ``McpError`` naming all servers that could not be
+    reached, rather than aborting on the first one (which would hide whether the
+    rest work and report a server the user may not even care about).
     """
     factory = client_factory or (lambda cfg: McpClient(cfg))
     warn = on_warn or (lambda _msg: None)
     mounted: list[MountedServer] = []
+    failures: list[str] = []
 
     for config in configs:
         client = factory(config)
@@ -93,8 +100,7 @@ def mount_mcp_tools(
             client.connect()
             tools = client.list_tools()
         except Exception as exc:  # noqa: BLE001
-            if strict:
-                raise
+            failures.append(f"{config.name} ({config.url}): {exc}")
             warn(f"skipping MCP server {config.name!r}: {exc}")
             continue
         names: list[str] = []
@@ -115,5 +121,9 @@ def mount_mcp_tools(
             )
             names.append(local_name)
         mounted.append(MountedServer(config=config, client=client, tool_names=names))
+
+    if strict and failures:
+        joined = "; ".join(failures)
+        raise McpError(f"{len(failures)} MCP server(s) failed to connect: {joined}")
 
     return mounted

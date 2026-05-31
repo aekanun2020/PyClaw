@@ -1,10 +1,19 @@
-# MCP servers discovered by pyclaw/mcp/client.py
-# (sample — mirrors EliteClaw's SSE + Streamable HTTP setup)
-servers:
-  - name: office-creator
-    url: http://localhost:8001/mcp
-    transport: streamable_http
-    fallback: sse
-  - name: workspace-mcp
-    url: http://localhost:8002/sse
-    transport: sse
+# MCP servers for `pyclaw run` (PyClaw YAML source).
+#
+# This file is OPTIONAL. PyClaw also reads EliteClaw/OpenClaw-style env vars
+# (MCP_SERVER_1_URL, ...) and an explicit .env via PYCLAW_DOTENV — see README.
+#
+# The block below is a commented-out EXAMPLE only. Uncomment and edit to define
+# servers here. Leaving it commented means YAML contributes no servers, so it
+# never injects unreachable localhost placeholders into your run.
+#
+# servers:
+#   - name: office-creator
+#     url: http://localhost:8001/mcp
+#     transport: streamable_http
+#     fallback: sse
+#     tool_prefix: office_
+#   - name: workspace-mcp
+#     url: http://localhost:8002/sse
+#     transport: sse
+servers: []
