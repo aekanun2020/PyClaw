@@ -71,19 +71,46 @@ def _coerce_type(value: Any) -> SubagentType:
         return SubagentType.GENERAL
 
 
+def _make_tool_provider(parent_registry: ToolRegistry | None):
+    """Return a provider that builds a child ToolRegistry holding the parent's
+    REAL tool callables for exactly the allowed names. This is what lets a
+    subagent actually execute parent/MCP tools instead of hallucinating.
+
+    Returns None when there is no parent registry (tests inject their own).
+    """
+    if parent_registry is None:
+        return None
+
+    def provider(allowed_names: tuple[str, ...]) -> ToolRegistry:
+        child = ToolRegistry()
+        for name in allowed_names:
+            tool = parent_registry.get(name)
+            if tool is not None:                 # skip unknown / spawn tool
+                child.register(tool)
+        return child
+
+    return provider
+
+
 def make_spawn_subagent_tool(
     *,
     parent_tools: tuple[str, ...] = (),
+    parent_registry: ToolRegistry | None = None,
     hooks: HookEngine | None = None,
     runner: SubagentRunner | None = None,
 ) -> Tool:
     """Build the `spawn_subagent` Tool wired to a real (or injected) runner.
 
     `parent_tools` is the tool set the child may inherit from (then narrowed by
-    type). Pass the parent registry's names AFTER MCP is mounted so subagents
-    can use the same MCP tools. `runner` is injectable for tests.
+    type). `parent_registry`, when given, lets subagents execute the parent's
+    REAL tool callables (e.g. MCP tools) for their allowed names. Pass both
+    AFTER MCP is mounted. `runner` is injectable for tests.
     """
-    _runner = runner or SubagentRunner(parent_tools=tuple(parent_tools), hooks=hooks)
+    _runner = runner or SubagentRunner(
+        parent_tools=tuple(parent_tools),
+        hooks=hooks,
+        tool_provider=_make_tool_provider(parent_registry),
+    )
 
     def _spawn(arguments: dict[str, Any]) -> Any:
         kind = _coerce_type(arguments.get("type"))
@@ -152,6 +179,11 @@ def register_spawn_subagent_tool(
     spawn tool itself is excluded from what children inherit.
     """
     parent_tools = tuple(n for n in registry.names() if n != SPAWN_TOOL_NAME)
-    tool = make_spawn_subagent_tool(parent_tools=parent_tools, hooks=hooks, runner=runner)
+    tool = make_spawn_subagent_tool(
+        parent_tools=parent_tools,
+        parent_registry=registry,
+        hooks=hooks,
+        runner=runner,
+    )
     registry.register(tool)
     return parent_tools

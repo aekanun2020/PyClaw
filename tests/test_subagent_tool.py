@@ -6,10 +6,11 @@ return ONLY summaries (isolation) — that is what we assert here.
 """
 from __future__ import annotations
 
-from pyclaw.core.tools import ToolRegistry
+from pyclaw.core.tools import Tool, ToolRegistry
 from pyclaw.subagents.runner import SubagentRunner
 from pyclaw.subagents.tool import (
     SPAWN_TOOL_NAME,
+    _make_tool_provider,
     make_spawn_subagent_tool,
     register_spawn_subagent_tool,
 )
@@ -75,6 +76,51 @@ def test_register_inherits_parent_tools_excluding_spawn():
     assert SPAWN_TOOL_NAME in reg.names()          # tool is now callable by the LLM
     assert set(inherited) == {"db_query", "pdpa_search"}
     assert SPAWN_TOOL_NAME not in inherited         # children never inherit spawn
+
+
+def test_tool_provider_hands_child_the_parents_real_tool():
+    """Regression: subagents must execute the parent's REAL tools (e.g. MCP),
+    not an empty registry that forces them to hallucinate answers."""
+    hits: list = []
+    parent = ToolRegistry()
+
+    def db_query(args):
+        hits.append(args)
+        return {"count": 9}
+
+    parent.register(Tool(name="db_query", description="", fn=db_query))
+    provider = _make_tool_provider(parent)
+
+    child = provider(("db_query",))
+    assert child.get("db_query") is not None            # real tool present
+    assert child.dispatch("db_query", {"sql": "X"})["count"] == 9
+    assert hits == [{"sql": "X"}]                        # parent's fn actually ran
+
+
+def test_tool_provider_skips_unknown_names():
+    """Names not in the parent registry are skipped — no fabricated tools."""
+    parent = ToolRegistry()
+    parent.register(Tool(name="real", description="", fn=lambda a: None))
+    child = _make_tool_provider(parent)(("real", "ghost"))
+    assert child.get("real") is not None
+    assert child.get("ghost") is None
+
+
+def test_tool_provider_none_without_parent_registry():
+    assert _make_tool_provider(None) is None
+
+
+def test_register_wires_a_provider_so_subagents_get_real_tools():
+    """register_spawn_subagent_tool must build a runner whose tool_provider
+    yields the parent's real tools (closing the hallucination gap end-to-end)."""
+    reg = ToolRegistry()
+    reg.register(Tool(name="db_query", description="", fn=lambda a: {"ok": True}))
+    register_spawn_subagent_tool(reg)
+    assert reg.get(SPAWN_TOOL_NAME) is not None
+    # Build the provider the same way register does and check it returns real tools.
+    provider = _make_tool_provider(reg)
+    child = provider(("db_query",))
+    assert child.dispatch("db_query", {}) == {"ok": True}
 
 
 def test_spawn_tool_has_llm_spec_with_enum():

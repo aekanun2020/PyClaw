@@ -44,6 +44,10 @@ class SubagentRunner:
     # Builds + runs an isolated loop for a spec, returning its final text.
     # Defaults to the real wiring in `build_isolated_runner` when None.
     run_isolated: Callable[[SubagentSpec], str] | None = None
+    # Given the resolved allowed tool names, return a ToolRegistry holding the
+    # REAL tool callables for those names (e.g. the parent's MCP tools). When
+    # None, the isolated loop runs with an empty registry (read-only/no tools).
+    tool_provider: Callable[[tuple[str, ...]], "object"] | None = None
     max_workers: int = 4
 
     def resolve_tools(self, spec: SubagentSpec) -> tuple[str, ...]:
@@ -96,7 +100,7 @@ class SubagentRunner:
 
         # 4. Run the isolated loop. Any failure is captured, not leaked as a
         #    raw transcript (still fail-*visible* via ok/error, principle #6).
-        runner = self.run_isolated or build_isolated_runner()
+        runner = self.run_isolated or build_isolated_runner(self.tool_provider)
         try:
             summary = runner(spec)
         except Exception as exc:  # noqa: BLE001 - surface as a structured result
@@ -144,13 +148,18 @@ class ParallelTeam:
         return [r for r in results if r is not None]
 
 
-def build_isolated_runner() -> Callable[[SubagentSpec], str]:
+def build_isolated_runner(
+    tool_provider: Callable[[tuple[str, ...]], "object"] | None = None,
+) -> Callable[[SubagentSpec], str]:
     """Return a function that builds and runs a REAL isolated AgentLoop.
 
     Deferred import keeps Layer 4 import-light and avoids a cycle with the core
     loop. The returned loop has:
       - a fresh ContextManager (no parent history — isolation, principle #2)
       - a PermissionPolicy allowlisted to exactly spec.allowed_tools
+      - a ToolRegistry holding the REAL callables for those allowed tools, built
+        by `tool_provider` (e.g. the parent's MCP tools). Without a provider the
+        registry is empty, so the subagent has no tools to call.
       - NO subagent tool (depth stays 1 — principle #3)
     """
 
@@ -170,6 +179,14 @@ def build_isolated_runner() -> Callable[[SubagentSpec], str]:
         # the safe default for a read-only EXPLORE/PLAN subagent).
         permissions = PermissionPolicy(allowed_tools=frozenset(spec.allowed_tools))
 
+        # Real tools for exactly the allowed names (e.g. parent MCP tools), so
+        # the subagent actually executes instead of hallucinating. Belt and
+        # braces: the permission allowlist above still gates every dispatch.
+        if tool_provider is not None:
+            tools = tool_provider(tuple(spec.allowed_tools))
+        else:
+            tools = ToolRegistry()
+
         loop = AgentLoop(
             llm=llm,
             hooks=HookEngine(),          # subagents inherit no parent hooks by default
@@ -177,10 +194,12 @@ def build_isolated_runner() -> Callable[[SubagentSpec], str]:
             audit=AuditLog(),
             hitl=HITLGate(),
             permissions=permissions,
-            tools=ToolRegistry(),        # caller registers only allowed tools if needed
+            tools=tools,
             system_prompt=(
                 f"You are a PyClaw {spec.type.value} subagent. "
-                "Work ONLY on the objective, then reply with a concise summary. "
+                "Work ONLY on the objective using the tools provided; do NOT "
+                "invent data. If you cannot verify something with a tool, say so. "
+                "When done, reply with a concise summary. "
                 "You may not spawn other subagents."
             ),
         )
