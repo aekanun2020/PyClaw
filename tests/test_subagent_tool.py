@@ -129,3 +129,62 @@ def test_spawn_tool_has_llm_spec_with_enum():
     assert spec["function"]["name"] == SPAWN_TOOL_NAME
     props = spec["function"]["parameters"]["properties"]
     assert set(props["type"]["enum"]) == {"explore", "plan", "review", "general"}
+
+
+def _tracing_runner(seen: list) -> SubagentRunner:
+    """A runner whose isolated run replays one tool tick through on_tool, so we
+    can observe the label the spawn tool attached."""
+    def run_isolated(spec, on_tool=None):
+        if on_tool is not None:
+            on_tool("call", "noop", {})
+        return f"summary: {spec.objective}"
+
+    return SubagentRunner(parent_tools=(), run_isolated=run_isolated)
+
+
+def test_spawn_tool_reads_parent_on_tool_and_labels_parallel():
+    """End-to-end (item d): the spawn tool picks up the parent's published
+    observer via the contextvar bridge and labels each parallel subagent."""
+    from pyclaw.subagents.trace import reset_active_on_tool, set_active_on_tool
+
+    seen: list = []
+
+    def parent_on_tool(phase, name, info):
+        seen.append(info.get("_label"))
+
+    tool = make_spawn_subagent_tool(runner=_tracing_runner(seen))
+    token = set_active_on_tool(parent_on_tool)        # the loop does this around dispatch
+    try:
+        tool.fn({"type": "general", "objectives": ["A", "B", "C"]})
+    finally:
+        reset_active_on_tool(token)
+
+    assert set(seen) == {"[sub#1]", "[sub#2]", "[sub#3]"}
+
+
+def test_spawn_tool_labels_single_subagent_sub1():
+    """A single spawn is still tagged [sub#1] so trace lines are attributable."""
+    from pyclaw.subagents.trace import reset_active_on_tool, set_active_on_tool
+
+    seen: list = []
+
+    def parent_on_tool(phase, name, info):
+        seen.append(info.get("_label"))
+
+    tool = make_spawn_subagent_tool(runner=_tracing_runner(seen))
+    token = set_active_on_tool(parent_on_tool)
+    try:
+        tool.fn({"type": "general", "objective": "solo task"})
+    finally:
+        reset_active_on_tool(token)
+
+    assert seen == ["[sub#1]"]
+
+
+def test_spawn_tool_silent_without_active_on_tool():
+    """No published observer (trace off) -> nothing forwarded, still works."""
+    seen: list = []
+    tool = make_spawn_subagent_tool(runner=_tracing_runner(seen))
+    out = tool.fn({"type": "general", "objective": "x"})  # no set_active_on_tool
+    assert out["ok"] is True
+    assert seen == []

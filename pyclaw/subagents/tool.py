@@ -23,7 +23,8 @@ from typing import Any
 
 from pyclaw.core.tools import Tool, ToolRegistry
 from pyclaw.hooks import HookEngine
-from pyclaw.subagents.runner import ParallelTeam, SubagentRunner
+from pyclaw.subagents.runner import ParallelTeam, SubagentRunner, _label_on_tool
+from pyclaw.subagents.trace import get_active_on_tool
 from pyclaw.subagents.types import SubagentSpec, SubagentType
 
 # The tool name is also the thing the runner strips from a child's tool set, so
@@ -118,13 +119,19 @@ def make_spawn_subagent_tool(
         objectives = arguments.get("objectives")
         single = arguments.get("objective")
 
-        # Parallel team when a list of objectives is given.
+        # The parent loop publishes its live trace observer around dispatch
+        # (see pyclaw.subagents.trace); pick it up so subagent tool calls show
+        # in --trace too. None when tracing is off — zero overhead then.
+        parent_on_tool = get_active_on_tool()
+
+        # Parallel team when a list of objectives is given. ParallelTeam labels
+        # each member [sub#N] so the interleaved stderr lines prove concurrency.
         if objectives:
             specs = [
                 SubagentSpec(type=kind, objective=str(o), model_preference=model)
                 for o in objectives
             ]
-            results = ParallelTeam(runner=_runner).run(specs)
+            results = ParallelTeam(runner=_runner).run(specs, on_tool=parent_on_tool)
             return {
                 "subagents": [
                     {
@@ -138,11 +145,12 @@ def make_spawn_subagent_tool(
                 ]
             }
 
-        # Single subagent.
+        # Single subagent — still labelled [sub#1] so trace lines are tagged.
         if not single:
             return "[error] provide 'objective' (one) or 'objectives' (many)"
         result = _runner.spawn(
-            SubagentSpec(type=kind, objective=str(single), model_preference=model)
+            SubagentSpec(type=kind, objective=str(single), model_preference=model),
+            on_tool=_label_on_tool(parent_on_tool, "[sub#1]"),
         )
         return {
             "type": result.spec.type.value,

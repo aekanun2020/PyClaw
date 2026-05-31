@@ -102,3 +102,88 @@ def test_parallel_team_preserves_order_and_runs_concurrently():
 def test_parallel_team_empty():
     runner = SubagentRunner(parent_tools=(), run_isolated=lambda s: "x")
     assert ParallelTeam(runner=runner).run([]) == []
+
+
+def test_call_runner_passes_on_tool_only_when_accepted():
+    """Backward-compat: a 1-arg test runner must NOT receive on_tool; a runner
+    that declares on_tool must receive it."""
+    from pyclaw.subagents.runner import _call_runner
+
+    seen = {}
+
+    def legacy(spec):                       # only takes spec
+        seen["legacy"] = True
+        return "ok"
+
+    def aware(spec, on_tool=None):          # accepts on_tool
+        seen["aware_on_tool"] = on_tool
+        return "ok"
+
+    sentinel = object()
+    assert _call_runner(legacy, _spec(), on_tool=sentinel) == "ok"
+    assert seen["legacy"] is True           # did not raise -> on_tool dropped
+    assert _call_runner(aware, _spec(), on_tool=sentinel) == "ok"
+    assert seen["aware_on_tool"] is sentinel
+
+
+def test_spawn_forwards_on_tool_to_isolated_runner():
+    """spawn() must thread the parent observer into the isolated run."""
+    got = {}
+
+    def run_isolated(spec, on_tool=None):
+        got["on_tool"] = on_tool
+        return "done"
+
+    runner = SubagentRunner(parent_tools=(), run_isolated=run_isolated)
+    sentinel = object()
+    runner.spawn(_spec(), on_tool=sentinel)
+    assert got["on_tool"] is sentinel
+
+
+def test_parallel_team_labels_each_subagent_and_interleaves():
+    """The core proof of concurrency: each subagent emits trace lines under its
+    own [sub#N] label, and the lines from different subagents INTERLEAVE rather
+    than appearing strictly grouped — direct evidence of parallel execution."""
+    events: list[str] = []
+    events_lock = __import__("threading").Lock()
+
+    def run_isolated(spec, on_tool=None):
+        # Two ticks per subagent, with a pause between, so a serial execution
+        # would group both ticks of one subagent before the next starts.
+        for tick in range(2):
+            if on_tool is not None:
+                on_tool("call", "tick", {"tick": tick})
+            time.sleep(0.05)
+        return f"done:{spec.objective}"
+
+    def collector(phase, name, info):
+        with events_lock:
+            events.append(info.get("_label", "?"))
+
+    runner = SubagentRunner(parent_tools=(), run_isolated=run_isolated, max_workers=3)
+    specs = [_spec(objective=f"t{i}") for i in range(3)]
+    ParallelTeam(runner=runner).run(specs, on_tool=collector)
+
+    # All three labels appeared.
+    labels = set(events)
+    assert labels == {"[sub#1]", "[sub#2]", "[sub#3]"}, labels
+    # Each subagent emitted both of its ticks.
+    assert events.count("[sub#1]") == 2
+    assert events.count("[sub#2]") == 2
+    assert events.count("[sub#3]") == 2
+    # Interleaving: the sequence is NOT strictly grouped (e.g. not
+    # [s1,s1,s2,s2,s3,s3]). With a pause between ticks, true parallelism makes
+    # distinct labels appear before any single subagent finishes both ticks.
+    grouped = ["[sub#1]"] * 2 + ["[sub#2]"] * 2 + ["[sub#3]"] * 2
+    assert events != grouped, f"expected interleaving, got serial order: {events}"
+    # Within the first 3 events, all three subagents should be represented if
+    # they truly ran at once (each fired its first tick before sleeping).
+    assert set(events[:3]) == {"[sub#1]", "[sub#2]", "[sub#3]"}, events
+
+
+def test_parallel_team_no_on_tool_is_silent():
+    """No observer -> no labels, no overhead, results still correct."""
+    runner = SubagentRunner(parent_tools=(), run_isolated=lambda s: f"r:{s.objective}")
+    specs = [_spec(objective=f"t{i}") for i in range(3)]
+    results = ParallelTeam(runner=runner).run(specs)  # on_tool defaults to None
+    assert [r.summary for r in results] == ["r:t0", "r:t1", "r:t2"]

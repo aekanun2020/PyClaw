@@ -158,17 +158,26 @@ def _cmd_run(task: str) -> int:
     return 0
 
 
-def _make_tool_tracer(write=None):
+def _make_tool_tracer(write=None, label: str = ""):
     """Return an on_tool(phase, name, info) callback that prints a live trace.
 
     `--trace` shows the full "tool execution" stage: the tool name, the
     arguments sent, and the result returned (plus elapsed time). It is OFF by
     default because results can contain PII (PDPA); the audit log only ever
     stores hashes, so this verbose view is opt-in.
+
+    `label` is an optional fixed prefix for every line. Subagents instead carry
+    their `[sub#N]` label per-call in `info["_label"]` (set by ParallelTeam), so
+    one shared tracer can tag lines from several concurrent subagents. A
+    `threading.Lock` serialises each whole-line write, so parallel subagents
+    never interleave MID-LINE on stderr (whole lines interleaving is the point —
+    that is the visible proof of concurrency).
     """
     import json as _json
+    import threading
 
     out = write or (lambda s: sys.stderr.write(s))
+    lock = threading.Lock()
 
     def _short(value: object, limit: int = 2000) -> str:
         try:
@@ -179,12 +188,20 @@ def _make_tool_tracer(write=None):
             text = str(value)
         return text if len(text) <= limit else text[:limit] + f"…(+{len(text) - limit} chars)"
 
+    def _prefix(info: dict) -> str:
+        tag = info.get("_label") or label
+        return f"{tag} " if tag else ""
+
     def on_tool(phase: str, name: str, info: dict) -> None:
         if phase == "call":
-            out(f"  → call  {name}({_short(info.get('arguments', {}))})\n")
+            line = f"  {_prefix(info)}→ call  {name}({_short(info.get('arguments', {}))})\n"
         elif phase == "return":
             secs = info.get("seconds", 0.0)
-            out(f"  ← return {name}  [{secs:.2f}s]  {_short(info.get('result'))}\n")
+            line = f"  {_prefix(info)}← return {name}  [{secs:.2f}s]  {_short(info.get('result'))}\n"
+        else:
+            return
+        with lock:
+            out(line)
 
     return on_tool
 

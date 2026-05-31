@@ -219,6 +219,110 @@ def test_tool_tracer_truncates_long_results():
     assert len(blob) < 5000                # not the full 5000-char payload
 
 
+def test_tool_tracer_prefixes_subagent_label():
+    """A subagent's [sub#N] label (carried in info['_label']) is printed as a
+    line prefix so the user can tell which subagent emitted each line."""
+    lines: list[str] = []
+    tracer = cli._make_tool_tracer(write=lines.append)
+    tracer("call", "db_query", {"arguments": {"sql": "X"}, "_label": "[sub#2]"})
+    tracer("return", "db_query", {"result": "y", "seconds": 0.0, "_label": "[sub#2]"})
+    blob = "".join(lines)
+    assert blob.count("[sub#2]") == 2          # both call and return tagged
+    assert "db_query" in blob
+
+
+def test_tool_tracer_fixed_label_param():
+    """A fixed `label` arg prefixes every line (when info has no _label)."""
+    lines: list[str] = []
+    tracer = cli._make_tool_tracer(write=lines.append, label="[parent]")
+    tracer("call", "t", {"arguments": {}})
+    assert "[parent]" in "".join(lines)
+
+
+def test_tool_tracer_unlabeled_lines_have_no_tag():
+    """Backward-compat: with no label anywhere, output is unprefixed."""
+    lines: list[str] = []
+    tracer = cli._make_tool_tracer(write=lines.append)
+    tracer("call", "t", {"arguments": {}})
+    blob = "".join(lines)
+    assert "[sub#" not in blob and "[parent]" not in blob
+
+
+def test_tool_tracer_writes_whole_lines_under_parallel_load():
+    """The tracer serialises whole-line writes so concurrent subagents never
+    interleave MID-LINE. We assert every captured chunk is a complete line."""
+    import threading
+
+    chunks: list[str] = []
+    chunks_lock = threading.Lock()
+
+    def collect(s):
+        with chunks_lock:
+            chunks.append(s)
+
+    tracer = cli._make_tool_tracer(write=collect)
+
+    def hammer(label):
+        for _ in range(20):
+            tracer("call", "t", {"arguments": {"k": "v"}, "_label": label})
+
+    threads = [threading.Thread(target=hammer, args=(f"[sub#{i}]",)) for i in range(1, 4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(chunks) == 60                       # 3 threads x 20 calls
+    # Each write is exactly one complete line (starts with spaces, ends in \n).
+    for c in chunks:
+        assert c.endswith("\n")
+        assert c.count("\n") == 1                  # no two lines fused together
+    # All three labels are represented.
+    joined = "".join(chunks)
+    for i in range(1, 4):
+        assert f"[sub#{i}]" in joined
+
+
+def test_invoke_tool_publishes_on_tool_to_contextvar():
+    """The loop must publish its on_tool around dispatch so a tool fn (the
+    spawn tool) can read it via the trace bridge (item d)."""
+    from pyclaw.core.llm import ToolCall
+    from pyclaw.core.loop import AgentLoop
+    from pyclaw.core.tools import Tool, ToolRegistry
+    from pyclaw.hooks import HookEngine
+    from pyclaw.plugins.permissions import PermissionPolicy
+    from pyclaw.runtime.audit import AuditLog
+    from pyclaw.runtime.context import ContextManager
+    from pyclaw.runtime.hitl import HITLGate
+    from pyclaw.subagents.trace import get_active_on_tool
+
+    seen = {}
+
+    def probe(arguments):
+        seen["active"] = get_active_on_tool()       # what the spawn tool would see
+        return "ok"
+
+    reg = ToolRegistry()
+    reg.register(Tool(name="probe", description="", fn=probe))
+    loop = AgentLoop(
+        llm=None,
+        hooks=HookEngine(),
+        context=ContextManager(),
+        audit=AuditLog(),
+        hitl=HITLGate(prompt_fn=lambda req: True),
+        permissions=PermissionPolicy(allowed_tools=frozenset({"probe"})),
+        tools=reg,
+    )
+
+    def sentinel(*a, **k):
+        return None
+
+    loop._invoke_tool(ToolCall(id="1", name="probe", arguments={}), "user", on_tool=sentinel)
+    assert seen["active"] is sentinel               # observer was visible during dispatch
+    # And it is reset afterwards (no leak across calls).
+    assert get_active_on_tool() is None
+
+
 def test_no_command_errors():
     with pytest.raises(SystemExit):
         cli.main([])
