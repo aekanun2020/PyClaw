@@ -368,6 +368,7 @@ def load_server_configs_from_dotenv(path: Path) -> list[McpServerConfig]:
     (`#`) and blanks are ignored, surrounding quotes are stripped, and a
     leading `export ` is tolerated. A missing file yields an empty list.
     """
+    path = Path(path)
     if not path.is_file():
         return []
     env: dict[str, str] = {}

@@ -264,3 +264,26 @@ def test_dotenv_file_roundtrip(tmp_path):
 
 def test_dotenv_missing_file(tmp_path):
     assert load_server_configs_from_dotenv(tmp_path / "nope.env") == []
+
+
+def test_dotenv_accepts_str_path(tmp_path):
+    # Regression: a plain string path must work, not only Path objects.
+    p = tmp_path / ".env"
+    p.write_text("MCP_SERVER_1_URL=http://h:8100/mcp\nMCP_SERVER_1_NAME=pdpa\n", encoding="utf-8")
+    cfgs = load_server_configs_from_dotenv(str(p))
+    assert [c.name for c in cfgs] == ["pdpa"]
+    assert load_server_configs_from_dotenv(str(tmp_path / "missing.env")) == []
+
+
+def test_dotenv_strips_trailing_whitespace_on_name_and_prefix(tmp_path):
+    # Real OpenClaw env files have trailing spaces after NAME/PREFIX values.
+    p = tmp_path / ".env"
+    p.write_text(
+        "MCP_SERVER_1_URL=http://h:8765/mcp\n"
+        "MCP_SERVER_1_NAME=asset-inventory   \n"
+        "MCP_SERVER_1_PREFIX=asset-inventory_   \n",
+        encoding="utf-8",
+    )
+    cfgs = load_server_configs_from_dotenv(str(p))
+    assert cfgs[0].name == "asset-inventory"
+    assert cfgs[0].tool_prefix == "asset-inventory_"
