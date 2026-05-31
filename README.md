@@ -93,3 +93,19 @@ which servers are configured.
 Prefer a file over env vars? Put servers in `.agent/mcp-servers.yaml` (keys:
 `name, url, transport, headers, fallback, timeout, tool_prefix`) — or point
 `PYCLAW_DOTENV` at an existing EliteClaw `.env`. All sources are merged.
+
+### Already have an EliteClaw / OpenClaw `.env`?
+
+Reuse it verbatim — one variable, nothing to rewrite:
+
+```bash
+pip install -e .
+PYCLAW_DOTENV=/path/to/your/.env pyclaw run "your task here"
+```
+
+PyClaw reads that file for **both** its MCP servers (`MCP_SERVER_1_*`, …) and
+its LLM settings: `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` (e.g. a local
+Ollama at `http://host:11434/v1`, where the key is `ollama`), and the model from
+`OPENROUTER_MODEL`. Set `PYCLAW_DEFAULT_MODEL` only if you want to override that
+model just for PyClaw. Run `PYCLAW_DOTENV=/path/.env pyclaw doctor` first to see
+every server it picked up.
