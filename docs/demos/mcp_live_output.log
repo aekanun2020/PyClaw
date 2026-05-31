@@ -1,0 +1,8 @@
+$ export MCP_SERVER_1_URL=http://127.0.0.1:9009
+$ export MCP_SERVER_1_NAME=clock  MCP_SERVER_1_PREFIX=clk_
+$ pyclaw run "Call clk_now and report the exact string it returns."
+
+[mcp] WARN skipping MCP server 'office-creator': MCP connect to 'office-creator' failed on both streamable_http ([Errno 111] Connection refused) and sse ([Errno 111] Connection refused)
+[mcp] WARN skipping MCP server 'workspace-mcp': MCP connect to 'workspace-mcp' failed: [Errno 111] Connection refused
+[mcp] clock: 1 tool(s) — clk_now
+MCP_TIME_2026-05-31T09:09:09Z

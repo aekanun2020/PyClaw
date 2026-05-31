@@ -30,8 +30,41 @@ def _api_key() -> str:
     return os.getenv("OPENROUTER_API_KEY", "") or SETTINGS.openrouter_api_key
 
 
+def _dotenv_path() -> Path | None:
+    """Locate an EliteClaw-style `.env` to read MCP servers from.
+
+    `PYCLAW_DOTENV` overrides; otherwise a `.env` in the current directory is
+    used if present. Returns None when there is nothing to read.
+    """
+    override = os.getenv("PYCLAW_DOTENV")
+    if override:
+        return Path(override)
+    local = Path.cwd() / ".env"
+    return local if local.is_file() else None
+
+
+def _mount_mcp(registry) -> list:
+    """Discover + connect MCP servers and register their tools into `registry`.
+
+    Reads both PyClaw YAML and EliteClaw `.env`. Returns the mounted servers
+    (empty list when no servers are configured — MCP is optional).
+    """
+    from pyclaw.mcp.bridge import discover_configs, mount_mcp_tools
+
+    configs = discover_configs(dotenv_path=_dotenv_path())
+    if not configs:
+        return []
+    strict = os.getenv("PYCLAW_MCP_STRICT", "").lower() in {"1", "true", "yes"}
+    return mount_mcp_tools(
+        registry,
+        configs,
+        strict=strict,
+        on_warn=lambda msg: sys.stderr.write(f"[mcp] WARN {msg}\n"),
+    )
+
+
 # -- shared assembly ----------------------------------------------------------
-def _build_loop(*, with_memory: bool = True, with_skills: bool = True):
+def _build_loop(*, with_memory: bool = True, with_skills: bool = True, with_mcp: bool = True):
     """Assemble a fully-wired AgentLoop from config/.agent. Returns the loop.
 
     Wiring (all 6 layers):
@@ -41,6 +74,7 @@ def _build_loop(*, with_memory: bool = True, with_skills: bool = True):
       L3 hooks   : HookEngine + default + plugin-contributed hooks
       L4 subagents: available via SubagentRunner (wired by callers as needed)
       L5 plugins : PluginLoader -> merged PermissionPolicy
+      MCP        : connect to configured servers, register their tools
     """
     from pyclaw.core.llm import OpenRouterProvider
     from pyclaw.core.loop import AgentLoop
@@ -79,6 +113,10 @@ def _build_loop(*, with_memory: bool = True, with_skills: bool = True):
             return False
         return answer in {"y", "yes"}
 
+    tools = ToolRegistry()
+    # MCP — register every configured server's tools (your primary surface).
+    mounted = _mount_mcp(tools) if with_mcp else []
+
     loop = AgentLoop(
         llm=OpenRouterProvider(),
         hooks=hooks,
@@ -86,10 +124,11 @@ def _build_loop(*, with_memory: bool = True, with_skills: bool = True):
         audit=AuditLog(),
         hitl=HITLGate(prompt_fn=_cli_prompt),
         permissions=permissions,
-        tools=ToolRegistry(),
+        tools=tools,
         memory=MemoryLoader(Path.cwd()) if with_memory else None,
         skills=SkillLoader(skills_registry) if with_skills else None,
     )
+    loop._mcp_mounted = mounted  # introspection for the CLI / doctor
     return loop
 
 
@@ -102,6 +141,11 @@ def _cmd_run(task: str) -> int:
         )
         return 2
     loop = _build_loop()
+    mounted = getattr(loop, "_mcp_mounted", [])
+    for m in mounted:
+        sys.stderr.write(
+            f"[mcp] {m.config.name}: {len(m.tool_names)} tool(s) — {', '.join(m.tool_names) or '(none)'}\n"
+        )
     answer = loop.run(task)
     sys.stdout.write(answer.rstrip() + "\n")
     return 0
@@ -150,9 +194,21 @@ def _cmd_doctor() -> int:
         except Exception as exc:  # noqa: BLE001
             checks.append((label, False, f"BROKEN: {exc}"))
 
-    # Can we assemble a full loop? (catches stubs that still raise NotImplementedError)
+    # MCP config discovery (offline — does NOT connect, so doctor never hangs).
     try:
-        _build_loop()
+        from pyclaw.mcp.bridge import discover_configs
+
+        cfgs = discover_configs(dotenv_path=_dotenv_path())
+        names = ", ".join(c.name for c in cfgs)
+        detail = f"{len(cfgs)} server(s) configured: {names}" if cfgs else "no servers configured (set MCP_SERVER_* or .agent/mcp-servers.yaml)"
+        checks.append(("mcp servers", True, detail))
+    except Exception as exc:  # noqa: BLE001
+        checks.append(("mcp servers", False, f"config error: {exc}"))
+
+    # Can we assemble a full loop? (catches stubs that still raise NotImplementedError)
+    # MCP is disabled here so doctor stays offline-safe (it won't dial servers).
+    try:
+        _build_loop(with_mcp=False)
         checks.append(("assemble AgentLoop", True, "ok"))
     except Exception as exc:  # noqa: BLE001
         checks.append(("assemble AgentLoop", False, f"FAILED: {exc}"))

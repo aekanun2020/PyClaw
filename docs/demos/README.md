@@ -98,3 +98,14 @@ API ที่เพิ่มใน `pyclaw.mcp`:
 
 วิธีสร้างภาพใหม่: รัน demo พร้อม `tee` เก็บ log แล้วเรนเดอร์ด้วย
 [`tools/render_terminal.py`](../../tools/render_terminal.py)
+
+## 6. MCP live — `pyclaw run` ใช้ทูลจาก MCP server จริง
+
+![MCP live demo](./mcp_live.png)
+
+log: [`mcp_live_output.log`](./mcp_live_output.log)
+
+พิสูจน์ว่า `pyclaw run` เชื่อม MCP server, ลงทะเบียนทูล (ตั้ง prefix), แล้ว LLM
+เรียกใช้ทูลผ่าน MCP จริง — ค่าที่ได้กลับ (`MCP_TIME_...`) มีอยู่เฉพาะใน MCP server
+เท่านั้น จึงยืนยันว่าเรียกผ่าน MCP จริง ไม่ได้เดา และ server ที่ต่อไม่ติดถูก skip
+พร้อมเตือน (ไม่ทำให้ agent ล่ม; ตั้ง `PYCLAW_MCP_STRICT=1` เพื่อ fail loud)
