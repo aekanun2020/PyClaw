@@ -35,6 +35,14 @@ def test_allows_normal_write() -> None:
     assert res.action is HookAction.ALLOW
 
 
+def test_destructive_tool_on_normal_path_escalates_to_notify() -> None:
+    # A destructive op on a non-protected path must NOT pass the hook silently;
+    # it escalates to NOTIFY so the HITL gate forces approval (spec section 9).
+    res = block_destructive(_pre("delete_file", path="README.md"))
+    assert res.action is HookAction.NOTIFY
+    assert res.message
+
+
 def test_allows_read_of_env_via_safe_tool() -> None:
     # read_file is not destructive, but .env is protected -> still blocked.
     res = block_destructive(_pre("read_file", path=".env"))

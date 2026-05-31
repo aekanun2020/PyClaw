@@ -4,11 +4,12 @@ This is the MVP-checklist hook ("ตั้ง PreToolUse hook เพื่อป
 operations"). It is deterministic: it fires on every matching tool call and the
 LLM cannot talk its way past it (principle #1).
 
-Blocks when EITHER:
-  - the tool is an outright destructive tool (delete_file, deploy_to_production,
-    modify_secrets), OR
-  - the tool touches a protected path (.env, anything under secrets/, .git/,
-    or files matching *.pem / id_rsa).
+Decision matrix (a destructive op never passes the hook silently):
+  - destructive tool on a protected path        -> BLOCK
+  - destructive tool on a normal path           -> NOTIFY (force HITL approval)
+  - any other tool touching a protected path    -> BLOCK
+    (protected = .env, anything under secrets/, .git/, *.pem, id_rsa)
+  - everything else                             -> ALLOW
 
 Argument paths are read from common keys (path, file, target, filename) and from
 any string value that looks like a path in `arguments`.
@@ -60,8 +61,7 @@ def block_destructive(payload: HookPayload) -> HookResult:
     args = payload.arguments or {}
 
     if tool in DESTRUCTIVE_TOOLS:
-        # Destructive tools are allowed only on non-protected paths, and even
-        # then the runtime HITL gate still asks for approval.
+        # A destructive tool on a protected path is blocked outright.
         bad = [p for p in _candidate_paths(args) if _is_protected(p)]
         if bad:
             return HookResult(
@@ -69,6 +69,19 @@ def block_destructive(payload: HookPayload) -> HookResult:
                 message=f"{tool} on protected path(s) {bad} is not allowed",
                 source_hook="block_destructive",
             )
+        # A destructive tool on a normal path never passes the hook silently
+        # (spec section 9: "prevent destructive operations"). We escalate with a
+        # NOTIFY so the runtime HITL gate must confirm before it runs — the LLM
+        # cannot skip this (principle #1: Prompt != Policy).
+        targets = _candidate_paths(args) or ["<no path>"]
+        return HookResult(
+            action=HookAction.NOTIFY,
+            message=(
+                f"destructive tool {tool!r} on {targets} requires explicit "
+                f"human approval"
+            ),
+            source_hook="block_destructive",
+        )
 
     # Any tool (e.g. write_file) touching a protected path is blocked outright.
     bad = [p for p in _candidate_paths(args) if _is_protected(p)]
