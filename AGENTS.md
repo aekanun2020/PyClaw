@@ -1,0 +1,32 @@
+# PyClaw specialized agents
+
+This file is the source of truth for the Orchestrator's agent registry (#5).
+The Orchestrator reads it at startup to build BOTH its routing prompt and each
+agent's allowed tool group. It is parsed by `pyclaw/orchestrator/registry.py`
+using the same `---` frontmatter convention as SKILL.md (see
+`pyclaw/skills/registry.py`).
+
+Each agent is one frontmatter block. Recognised keys:
+
+  - `name`        : the agent id used in `route_to_agent(agent=...)`.
+  - `description` : when-to-use text, shown verbatim in the routing prompt.
+  - `tools`       : comma-separated tool-name prefixes the agent may use. A
+                    tool is granted to the agent when its name starts with any
+                    listed prefix (e.g. `db_` matches `db_execute_query_tool`).
+                    The orchestrator resolves these against the live tool
+                    registry, so the agent only ever receives REAL callables.
+
+Backward-compat note: this file is config only. With `--orchestrator` OFF (the
+default) nothing here is loaded, so the flat chat loop is unaffected.
+
+---
+name: db-agent
+description: Read-only queries against TestDB, an HR system with 9 tables. Use for questions about employees, departments, salaries, org structure, or any tabular HR data. Cannot write or modify data.
+tools: db_
+---
+
+---
+name: pdpa-agent
+description: Thai PDPA (Personal Data Protection Act) law question-and-answer. Use for questions about Thai data-protection law, PDPA sections, penalties, and compliance obligations.
+tools: pdpa_
+---
