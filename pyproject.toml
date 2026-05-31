@@ -1,0 +1,33 @@
+[project]
+name = "pyclaw"
+version = "0.1.0"
+description = "PyClaw = EliteClaw rewritten in Python + more features. A deterministic-first agent runtime implementing the 5-Layer ADK Spec, where policy lives in code (Hooks), not prompts."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "aekanun2020" }]
+license = { text = "MIT" }
+
+dependencies = [
+    "pydantic>=2.6",        # typed payloads/configs (แทน @sinclair/typebox ของ EliteClaw)
+    "pyyaml>=6.0",          # plugin.yaml / permissions.yaml / mcp-servers.yaml
+    "httpx>=0.27",          # OpenRouter LLM + HTTP hook runner
+    "python-dotenv>=1.0",   # .env (เหมือน EliteClaw)
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4", "mypy>=1.10"]
+
+[project.scripts]
+pyclaw = "pyclaw.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true

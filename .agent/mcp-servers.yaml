@@ -1,0 +1,10 @@
+# MCP servers discovered by pyclaw/mcp/client.py
+# (sample — mirrors EliteClaw's SSE + Streamable HTTP setup)
+servers:
+  - name: office-creator
+    url: http://localhost:8001/mcp
+    transport: streamable_http
+    fallback: sse
+  - name: workspace-mcp
+    url: http://localhost:8002/sse
+    transport: sse

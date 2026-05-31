@@ -1,0 +1,24 @@
+# Example hook registrations (Layer 3). Loaded into HookEngine at startup.
+# These are DETERMINISTIC policies — exactly the logic that must NOT live in a
+# prompt (principle #1).
+hooks:
+  # Block writes to PDPA-sensitive paths, in code, every time.
+  - name: pdpa-path-guard
+    event: PreToolUse
+    runner: python
+    target: pyclaw_hooks.pdpa:guard      # def guard(payload) -> HookResult
+    priority: 10
+
+  # Audit every tool call (advisory notify; the loop also writes audit.jsonl).
+  - name: notify-on-delete
+    event: PreToolUse
+    runner: bash
+    target: "./.agent/hooks/notify_delete.sh"
+    priority: 50
+
+  # Redact secrets from the final response before it reaches the user.
+  - name: redact-secrets
+    event: PreResponse
+    runner: python
+    target: pyclaw_hooks.redact:run
+    priority: 10
