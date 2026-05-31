@@ -190,3 +190,40 @@ def test_multi_turn_preserves_history_single_system(tmp_path: Path) -> None:
     assert "my name is Aekanun" in contents            # turn 1 user msg replayed
     assert "first answer" in contents                  # turn 1 assistant reply replayed
     assert "what is my name?" in contents              # turn 2 user msg present
+
+
+# --- streaming: on_delta receives chunks; final answer still returned --------
+@dataclass
+class StreamingFakeLLM:
+    """Fake provider that streams a reply in chunks via on_delta."""
+
+    chunks: list[str]
+
+    def complete(self, messages, tools=None, model=None, temperature=0.0):  # noqa: ANN001
+        return LLMResponse(text="".join(self.chunks))
+
+    def complete_stream(self, messages, tools=None, model=None, temperature=0.0,
+                        on_delta=None):  # noqa: ANN001
+        for c in self.chunks:
+            if on_delta is not None:
+                on_delta(c)
+        return LLMResponse(text="".join(self.chunks))
+
+
+def test_run_streams_via_on_delta(tmp_path: Path) -> None:
+    llm = StreamingFakeLLM(chunks=["Hel", "lo ", "world"])
+    loop, _ = _build(tmp_path, llm=llm)
+    seen: list[str] = []
+    out = loop.run("hi", on_delta=seen.append)
+    assert out == "Hello world"          # full answer returned to caller
+    assert seen == ["Hel", "lo ", "world"]  # and streamed chunk-by-chunk
+
+
+def test_run_without_on_delta_uses_blocking_complete(tmp_path: Path) -> None:
+    # No on_delta -> must NOT stream (falls back to .complete()).
+    llm = StreamingFakeLLM(chunks=["a", "b"])
+    loop, _ = _build(tmp_path, llm=llm)
+    seen: list[str] = []
+    out = loop.run("hi")  # no on_delta
+    assert out == "ab"
+    assert seen == []     # nothing streamed

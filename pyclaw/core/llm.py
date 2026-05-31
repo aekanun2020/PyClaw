@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -81,6 +82,40 @@ class OpenRouterProvider:
         data = self._make_request("/chat/completions", body)
         return self._parse(data)
 
+    def complete_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        temperature: float = 0.0,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> LLMResponse:
+        """Like `complete`, but streams text deltas via Server-Sent Events.
+
+        Each text chunk is passed to `on_delta` as it arrives (this is the
+        "streaming replies" stage of the agentic loop). Tool-call deltas are
+        accumulated and assembled into the final LLMResponse, so the agent loop
+        behaves identically to the non-streaming path once the turn completes.
+
+        Fails loudly on missing key / non-2xx, same as `complete`.
+        """
+        if not self.api_key:
+            raise RuntimeError("OPENROUTER_API_KEY not set (fail loudly, principle #6)")
+
+        body: dict[str, Any] = {
+            "model": model or self.model,
+            "messages": messages,
+            "max_tokens": self.max_tokens,
+            "temperature": temperature,
+            "seed": 0,
+            "stream": True,
+        }
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+
+        return self._stream_request("/chat/completions", body, on_delta)
+
     # -- internals ------------------------------------------------------------
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -128,6 +163,85 @@ class OpenRouterProvider:
 
         # Exhausted retries on network errors.
         raise RuntimeError(f"OpenRouter request failed: {last_error}")
+
+    def _stream_request(
+        self,
+        endpoint: str,
+        body: dict[str, Any],
+        on_delta: Callable[[str], None] | None,
+    ) -> LLMResponse:
+        """POST with stream=True and assemble deltas into one LLMResponse."""
+        url = f"{self.base_url.rstrip('/')}{endpoint}"
+        text_parts: list[str] = []
+        # tool calls arrive in fragments keyed by index; accumulate per index.
+        tool_acc: dict[int, dict[str, Any]] = {}
+
+        try:
+            with httpx.stream(
+                "POST", url, headers=self._headers(), json=body, timeout=self.timeout
+            ) as resp:
+                if resp.status_code >= 400:
+                    detail = resp.read().decode("utf-8", "replace")[:500]
+                    raise RuntimeError(
+                        f"OpenRouter API error {resp.status_code}: {detail}"
+                    )
+                for chunk in self._iter_sse_deltas(resp.iter_lines()):
+                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    piece = delta.get("content")
+                    if piece:
+                        text_parts.append(piece)
+                        if on_delta is not None:
+                            on_delta(piece)
+                    for tc in delta.get("tool_calls") or []:
+                        idx = tc.get("index", 0)
+                        slot = tool_acc.setdefault(
+                            idx, {"id": "", "name": "", "arguments": ""}
+                        )
+                        if tc.get("id"):
+                            slot["id"] = tc["id"]
+                        fn = tc.get("function", {})
+                        if fn.get("name"):
+                            slot["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            slot["arguments"] += fn["arguments"]
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(
+                f"OpenRouter request timed out after {self.timeout}s"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"OpenRouter network error: {exc}") from exc
+
+        tool_calls: list[ToolCall] = []
+        for _idx in sorted(tool_acc):
+            slot = tool_acc[_idx]
+            raw_args = slot["arguments"] or "{}"
+            try:
+                parsed_args = json.loads(raw_args)
+            except (json.JSONDecodeError, TypeError):
+                parsed_args = {"_raw": raw_args}
+            tool_calls.append(
+                ToolCall(id=slot["id"], name=slot["name"], arguments=parsed_args)
+            )
+
+        return LLMResponse(text="".join(text_parts), tool_calls=tool_calls)
+
+    @staticmethod
+    def _iter_sse_deltas(lines: Iterator[str]) -> Iterator[dict[str, Any]]:
+        """Yield parsed JSON objects from an OpenAI-style SSE `data:` stream.
+
+        Skips comments/keep-alives and the terminal `data: [DONE]` sentinel.
+        Malformed fragments are ignored (a partial line never crashes the chat).
+        """
+        for line in lines:
+            if not line or not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if payload == "[DONE]" or not payload:
+                continue
+            try:
+                yield json.loads(payload)
+            except json.JSONDecodeError:
+                continue
 
     @staticmethod
     def _parse(data: dict[str, Any]) -> LLMResponse:

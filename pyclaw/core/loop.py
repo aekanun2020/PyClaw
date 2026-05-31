@@ -65,10 +65,16 @@ class AgentLoop:
     max_tool_rounds: int = SETTINGS.max_tool_rounds
     system_prompt: str = "You are PyClaw, a deterministic-first agent."
 
-    def run(self, user_request: str, user: str = "user") -> str:
-        """Run the loop to a final text answer."""
+    def run(self, user_request: str, user: str = "user", on_delta=None) -> str:
+        """Run the loop to a final text answer.
+
+        If `on_delta` (a callable taking a text chunk) is given, assistant text
+        is streamed to it as it is generated — the "streaming replies" stage of
+        the agentic loop. The returned value is still the complete final answer,
+        so callers that don't stream are unaffected.
+        """
         try:
-            return self._run(user_request, user)
+            return self._run(user_request, user, on_delta)
         except Exception as exc:  # OnError hook, then re-raise (fail loudly, #6)
             self.hooks.fire(
                 HookPayload(event=HookEvent.ON_ERROR, user=user, extra={"error": str(exc)})
@@ -76,7 +82,7 @@ class AgentLoop:
             raise
 
     # -- internals ------------------------------------------------------------
-    def _run(self, user_request: str, user: str) -> str:
+    def _run(self, user_request: str, user: str, on_delta=None) -> str:
         self.hooks.fire(HookPayload(event=HookEvent.PRE_SESSION, user=user))
 
         # Append the system prompt only when the conversation is empty. In
@@ -94,7 +100,14 @@ class AgentLoop:
             if self.context.maybe_compact():
                 self.hooks.fire(HookPayload(event=HookEvent.POST_COMPACTION, user=user))
 
-            response = self.llm.complete(self._as_llm_messages(), tools=tool_specs)
+            # Stream when the caller asked for it AND the provider supports it;
+            # otherwise fall back to the blocking call (same final result).
+            if on_delta is not None and hasattr(self.llm, "complete_stream"):
+                response = self.llm.complete_stream(
+                    self._as_llm_messages(), tools=tool_specs, on_delta=on_delta
+                )
+            else:
+                response = self.llm.complete(self._as_llm_messages(), tools=tool_specs)
 
             if not response.tool_calls:
                 # Record the assistant's final reply so it persists in context.

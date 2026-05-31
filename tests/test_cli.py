@@ -64,13 +64,17 @@ def test_chat_repl_multi_turn_and_quit(capsys, monkeypatch):
             builds.append(1)
             self.seen: list[str] = []
 
-        def run(self, task, user="user"):
+        def run(self, task, user="user", on_delta=None):
             self.seen.append(task)
-            return f"reply#{len(self.seen)}: {task}"
+            reply = f"reply#{len(self.seen)}: {task}"
+            if on_delta:
+                on_delta(reply)
+            return reply
 
     one = FakeLoop.__new__(FakeLoop)
     one.seen = []
     one._mcp_mounted = []
+    one.context = __import__("pyclaw.runtime.context", fromlist=["ContextManager"]).ContextManager()
     monkeypatch.setattr(cli, "_build_loop", lambda **kw: (builds.append(1) or one))
 
     # Two real turns, one blank line (ignored), then quit.
@@ -97,9 +101,13 @@ def test_chat_without_key_fails_fast(capsys, monkeypatch):
 def test_chat_eof_exits_cleanly(capsys, monkeypatch):
     monkeypatch.setattr(cli, "_api_key", lambda: "sk-test")
 
+    from pyclaw.runtime.context import ContextManager
+
     class FakeLoop:
         _mcp_mounted: list = []
-        def run(self, task, user="user"):
+        def __init__(self):
+            self.context = ContextManager()
+        def run(self, task, user="user", on_delta=None):
             return "x"
 
     monkeypatch.setattr(cli, "_build_loop", lambda **kw: FakeLoop())
@@ -110,6 +118,78 @@ def test_chat_eof_exits_cleanly(capsys, monkeypatch):
     monkeypatch.setattr("builtins.input", _raise)
     rc = cli.main(["chat"])
     assert rc == 0  # Ctrl-D exits cleanly
+
+
+def test_chat_persists_and_resumes(tmp_path, capsys, monkeypatch):
+    """chat saves the session each turn; --resume reloads it into a new loop."""
+    from pyclaw.runtime.context import ContextManager, Message, Role
+    from pyclaw.runtime.session import SessionStore
+
+    monkeypatch.setattr(cli, "_api_key", lambda: "sk-test")
+    store = SessionStore(root=tmp_path / "sessions")
+    monkeypatch.setattr(cli, "SessionStore", lambda: store, raising=False)
+    # _cmd_chat imports SessionStore locally; patch the source module instead.
+    import pyclaw.runtime.session as sess_mod
+    monkeypatch.setattr(sess_mod, "SessionStore", lambda *a, **k: store)
+
+    class FakeLoop:
+        def __init__(self):
+            self.context = ContextManager()
+            self._mcp_mounted = []
+
+        def run(self, task, user="user", on_delta=None):
+            self.context.append(Message(role=Role.USER, content=task))
+            reply = f"echo:{task}"
+            if on_delta:
+                on_delta(reply)
+            self.context.append(Message(role=Role.ASSISTANT, content=reply))
+            return reply
+
+    loop1 = FakeLoop()
+    monkeypatch.setattr(cli, "_build_loop", lambda **kw: loop1)
+    lines = iter(["remember 42", "quit"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(lines))
+
+    rc = cli.main(["chat"])
+    assert rc == 0
+    saved = store.list_ids()
+    assert len(saved) == 1                       # session persisted to disk
+    sid = saved[0]
+
+    # New process / loop: resume the saved session and confirm history loaded.
+    loop2 = FakeLoop()
+    monkeypatch.setattr(cli, "_build_loop", lambda **kw: loop2)
+    lines2 = iter(["quit"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(lines2))
+    rc = cli.main(["chat", "--resume", sid])
+    assert rc == 0
+    contents = [m.content for m in loop2.context.messages]
+    assert "remember 42" in contents             # prior turn restored
+    assert "echo:remember 42" in contents
+
+
+def test_chat_resume_missing_fails(capsys, monkeypatch, tmp_path):
+    from pyclaw.runtime.session import SessionStore
+    import pyclaw.runtime.session as sess_mod
+
+    monkeypatch.setattr(cli, "_api_key", lambda: "sk-test")
+    store = SessionStore(root=tmp_path / "sessions")
+    monkeypatch.setattr(sess_mod, "SessionStore", lambda *a, **k: store)
+
+    class FakeLoop:
+        from pyclaw.runtime.context import ContextManager as _CM
+        def __init__(self):
+            from pyclaw.runtime.context import ContextManager
+            self.context = ContextManager()
+            self._mcp_mounted = []
+        def run(self, *a, **k):
+            return "x"
+
+    monkeypatch.setattr(cli, "_build_loop", lambda **kw: FakeLoop())
+    rc = cli.main(["chat", "--resume", "no-such-id"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "not found" in err
 
 
 def test_no_command_errors():

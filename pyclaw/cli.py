@@ -151,14 +151,23 @@ def _cmd_run(task: str) -> int:
     return 0
 
 
-def _cmd_chat() -> int:
-    """Interactive multi-turn chat (EliteClaw-style).
+def _cmd_chat(resume: str | None = None, no_stream: bool = False) -> int:
+    """Interactive multi-turn chat (EliteClaw-style), completing the agentic loop.
 
-    Builds the loop + mounts MCP exactly ONCE, then reads requests from stdin
-    in a REPL, reusing the same AgentLoop (and therefore the same conversation
-    context) across turns. This both preserves history between questions and
-    avoids reconnecting to MCP servers on every turn (the one-shot `run` did
-    both per process). Exit with `quit`/`exit`, or Ctrl-D / Ctrl-C.
+    The OpenClaw definition of an agentic loop is:
+        intake -> context assembly -> model inference -> tool execution
+        -> streaming replies -> persistence
+
+    This command realises all of it:
+      - builds the loop + mounts MCP exactly ONCE, reusing the same context
+        across turns (history / Short-term Memory; also avoids reconnecting MCP);
+      - streams assistant text token-by-token as it is generated (unless
+        --no-stream);
+      - persists the conversation to `.agent/sessions/<id>.json` after every
+        turn, so a chat can be resumed later with `--resume <id>` (Episodic
+        Memory across processes).
+
+    Exit with `quit`/`exit`, or Ctrl-D / Ctrl-C.
     """
     if not _api_key():
         sys.stderr.write(
@@ -166,6 +175,8 @@ def _cmd_chat() -> int:
             "        export OPENROUTER_API_KEY=... and retry.\n"
         )
         return 2
+
+    from pyclaw.runtime.session import SessionStore
 
     # Build once: this is where MCP servers are dialed and tools registered.
     loop = _build_loop()
@@ -175,8 +186,25 @@ def _cmd_chat() -> int:
             f"[mcp] {m.config.name}: {len(m.tool_names)} tool(s) — {', '.join(m.tool_names) or '(none)'}\n"
         )
 
+    store = SessionStore()
+    if resume:
+        try:
+            meta = store.load_into(resume, loop.context)
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return 2
+        session_id = meta["id"]
+        turns = sum(1 for m in loop.context.messages if m.role.value == "user")
+        sys.stderr.write(f"[session] resumed {session_id} ({turns} prior turn(s))\n")
+    else:
+        session_id = store.create()
+        sys.stderr.write(f"[session] new {session_id}\n")
+
+    stream = not no_stream
     sys.stderr.write(
-        "\nPyClaw chat — multi-turn, history preserved across turns.\n"
+        "\nPyClaw chat — multi-turn, history preserved + persisted across turns.\n"
+        f"  streaming: {'on' if stream else 'off'}   session saved to: "
+        f"{store.root}/{session_id}.json\n"
         "Type your request and press Enter. Commands: 'quit' / 'exit' to leave.\n\n"
     )
     sys.stderr.flush()
@@ -197,13 +225,28 @@ def _cmd_chat() -> int:
             sys.stderr.write("bye.\n")
             return 0
 
+        # Stream assistant text to stdout as it arrives (streaming replies).
+        def _emit(chunk: str) -> None:
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+
         try:
-            answer = loop.run(task)
+            if stream:
+                answer = loop.run(task, on_delta=_emit)
+                sys.stdout.write("\n")  # finish the streamed line
+            else:
+                answer = loop.run(task)
+                sys.stdout.write(answer.rstrip() + "\n")
+            sys.stdout.flush()
         except Exception as exc:  # noqa: BLE001 — keep the REPL alive on errors.
-            sys.stderr.write(f"[error] {exc}\n")
+            sys.stderr.write(f"\n[error] {exc}\n")
             continue
-        sys.stdout.write(answer.rstrip() + "\n")
-        sys.stdout.flush()
+
+        # Persistence: save the whole conversation after every completed turn.
+        try:
+            store.save(session_id, loop.context)
+        except OSError as exc:  # noqa: BLE001
+            sys.stderr.write(f"[warn] could not save session: {exc}\n")
 
 
 def _cmd_doctor() -> int:
@@ -286,7 +329,17 @@ def main(argv: list[str] | None = None) -> int:
     run_p = sub.add_parser("run", help="run a task through the agent loop")
     run_p.add_argument("task", help="the task / user request")
 
-    sub.add_parser("chat", help="interactive multi-turn chat with persistent history")
+    chat_p = sub.add_parser(
+        "chat", help="interactive multi-turn chat with streaming + persistent history"
+    )
+    chat_p.add_argument(
+        "--resume", metavar="SESSION_ID",
+        help="resume a saved session from .agent/sessions/<id>.json",
+    )
+    chat_p.add_argument(
+        "--no-stream", action="store_true",
+        help="disable token streaming (print the full reply at once)",
+    )
 
     sub.add_parser("doctor", help="check config, .agent layout, and layer wiring")
 
@@ -295,7 +348,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         return _cmd_run(args.task)
     if args.command == "chat":
-        return _cmd_chat()
+        return _cmd_chat(resume=args.resume, no_stream=args.no_stream)
     if args.command == "doctor":
         return _cmd_doctor()
     return 0
