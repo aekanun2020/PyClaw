@@ -2,13 +2,35 @@
 
 Usage: python tools/render_terminal.py <input.log> <output.png> "<title>"
 """
+import re
 import sys
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
+# Strip ANSI escape sequences (CSI codes like \x1b[1m, \x1b[92m, \x1b[0m).
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+def strip_ansi(s: str) -> str:
+    return ANSI_RE.sub("", s)
+
+# DejaVuSansMono has no colour-emoji glyphs; map status emoji to ASCII so the
+# rendered PNG never shows empty boxes.
+EMOJI_MAP = {
+    "\U0001F534": "[RED]",     # 🔴 missing/absent
+    "\U0001F7E1": "[PARTIAL]", # 🟡 partial
+    "\U0001F7E2": "[DONE]",    # 🟢 implemented
+    "\u2605": "*",             # ★
+    "\u2192": "->",            # →
+}
+
+def demoji(s: str) -> str:
+    for k, v in EMOJI_MAP.items():
+        s = s.replace(k, v)
+    return s
+
 inp, outp, title = sys.argv[1], sys.argv[2], (sys.argv[3] if len(sys.argv) > 3 else "PyClaw demo")
 text = Path(inp).read_text(encoding="utf-8").rstrip("\n")
-lines = text.split("\n")
+lines = [demoji(strip_ansi(l)) for l in text.split("\n")]
 
 # Layout
 PAD = 22
@@ -61,11 +83,12 @@ d.text((W // 2 - d0.textlength(title, font=tfont) / 2, 10), title, font=tfont, f
 
 def color_for(line: str):
     s = line.strip()
-    if s.startswith("=" * 5) or s.startswith("-" * 5):
+    if s.startswith("=" * 5) or s.startswith("-" * 5) or set(s) <= {"\u2500"} and s:
         return DIM
-    if "PASS" in line or "-> True" in line or s.startswith(">>> PASS") or "RESULT:" in line:
+    # PASS takes priority: a PASS line may legitimately mention 'BLOCK'/'block'.
+    if "[PASS]" in line or "PASS" in line or "-> True" in line or s.startswith(">>> PASS") or "RESULT:" in line:
         return GREEN
-    if "BLOCK" in line or "blocked" in line or "FAIL" in line or "can't" in line.lower() or "can’t" in line.lower():
+    if "[FAIL]" in line or "FAIL" in line or s.startswith("can't") or s.startswith("can’t"):
         return RED
     if s.startswith("Q:") or s.startswith("PART") or s.startswith("SCENARIO"):
         return CYAN
