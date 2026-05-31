@@ -32,6 +32,22 @@ check("AGENT_MEMORY.md exists at project root", mem.exists())
 check("contains coding standards", any(k in txt.lower() for k in ["coding standard","naming","convention","มาตรฐาน"]), f"{len(txt)} chars")
 check("contains architectural rules", any(k in txt.lower() for k in ["architect","layer","prompt","policy","สถาปัตย"]))
 
+# ── Layer 1 — MemoryLoader: directory walk + @import + caps ───────
+header("Layer 1 — MemoryLoader: directory walk, @import (5 hops), AUTO_MEMORY caps")
+import tempfile as _tf
+from pyclaw.memory.loader import MemoryLoader, AUTO_MEMORY_MAX_LINES
+_proj = Path(_tf.mkdtemp()); _svc = _proj/"svc"; _svc.mkdir()
+(_proj/"inc.md").write_text("CANARY-XYZ", encoding="utf-8")
+(_proj/"AGENT_MEMORY.md").write_text("GLOBAL_R\n@./inc.md", encoding="utf-8")
+(_svc/"AGENT_MEMORY.md").write_text("LOCAL_R", encoding="utf-8")
+(_svc/"AUTO_MEMORY.md").write_text("\n".join(f"n{i}" for i in range(AUTO_MEMORY_MAX_LINES+50)), encoding="utf-8")
+_b = MemoryLoader(root=_proj).load(start=_svc)
+check("directory walk merges global + local", "GLOBAL_R" in _b.text and "LOCAL_R" in _b.text)
+check("scope order: global before local", _b.text.index("GLOBAL_R") < _b.text.index("LOCAL_R"))
+check("@import expanded (CANARY pulled in, marker gone)", "CANARY-XYZ" in _b.text and "@./inc.md" not in _b.text)
+check("AUTO_MEMORY capped at 200 lines", len([l for l in _b.text.splitlines() if l.startswith('n')]) <= AUTO_MEMORY_MAX_LINES)
+shutil.rmtree(_proj, ignore_errors=True)
+
 # ── Layer 2 — Skills ──────────────────────────────────────────────
 header("Layer 2 — Skill: registry scan + lazy load + auto-detect (Design #2)")
 reg = SkillRegistry(); reg.scan(ROOT / ".agent" / "skills")
