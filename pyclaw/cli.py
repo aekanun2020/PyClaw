@@ -2,15 +2,170 @@
 
 Usage:
     pyclaw run "your task here"
+    pyclaw doctor
 
-Wires up every layer with defaults discovered from `.agent/`, then runs the
-AgentLoop.
+`run` assembles every layer from `.agent/` + environment and executes one task
+through the AgentLoop. `doctor` validates the wiring and reports any missing or
+broken layer (principle #6 — fail loudly: a missing required layer is a hard
+error, not a silent default).
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
+
+import os
+
+from pyclaw.config import SETTINGS
+
+
+def _api_key() -> str:
+    """Read the OpenRouter key live from the environment.
+
+    SETTINGS is frozen at import time; reading the env here means `doctor`/`run`
+    reflect the current shell (and are trivially testable via monkeypatch).
+    """
+    return os.getenv("OPENROUTER_API_KEY", "") or SETTINGS.openrouter_api_key
+
+
+# -- shared assembly ----------------------------------------------------------
+def _build_loop(*, with_memory: bool = True, with_skills: bool = True):
+    """Assemble a fully-wired AgentLoop from config/.agent. Returns the loop.
+
+    Wiring (all 6 layers):
+      L0 runtime : ContextManager + AuditLog + HITLGate
+      L1 memory  : MemoryLoader rooted at cwd (global->local walk)
+      L2 skills  : SkillRegistry scanned from .agent/skills
+      L3 hooks   : HookEngine + default + plugin-contributed hooks
+      L4 subagents: available via SubagentRunner (wired by callers as needed)
+      L5 plugins : PluginLoader -> merged PermissionPolicy
+    """
+    from pyclaw.core.llm import OpenRouterProvider
+    from pyclaw.core.loop import AgentLoop
+    from pyclaw.core.tools import ToolRegistry
+    from pyclaw.hooks import HookEngine
+    from pyclaw.memory import MemoryLoader
+    from pyclaw.plugins.loader import PluginLoader
+    from pyclaw.plugins.permissions import PermissionPolicy
+    from pyclaw.runtime.audit import AuditLog
+    from pyclaw.runtime.context import ContextManager
+    from pyclaw.runtime.hitl import HITLGate
+    from pyclaw.skills.loader import SkillLoader
+    from pyclaw.skills.registry import SkillRegistry
+
+    hooks = HookEngine()
+    skills_registry = SkillRegistry()
+
+    # L5 — plugins contribute hooks/skills and a merged permission policy.
+    plugins_root = SETTINGS.agent_dir / "plugins"
+    permissions = PermissionPolicy()
+    loader = PluginLoader(plugins_root=plugins_root, installed_versions={"core": "0.1.0"})
+    permissions = loader.load_all(hooks=hooks, skills=skills_registry)
+
+    # L2 — also scan a top-level .agent/skills dir if present.
+    skills_dir = SETTINGS.agent_dir / "skills"
+    if skills_dir.is_dir():
+        skills_registry.scan(skills_dir)
+
+    # A simple CLI prompt for HITL approval (fail-closed: empty -> deny).
+    def _cli_prompt(req) -> bool:
+        sys.stderr.write(f"[approval] run {req.tool} with {req.arguments}? [y/N] ")
+        sys.stderr.flush()
+        try:
+            answer = input().strip().lower()
+        except EOFError:
+            return False
+        return answer in {"y", "yes"}
+
+    loop = AgentLoop(
+        llm=OpenRouterProvider(),
+        hooks=hooks,
+        context=ContextManager(),
+        audit=AuditLog(),
+        hitl=HITLGate(prompt_fn=_cli_prompt),
+        permissions=permissions,
+        tools=ToolRegistry(),
+        memory=MemoryLoader(Path.cwd()) if with_memory else None,
+        skills=SkillLoader(skills_registry) if with_skills else None,
+    )
+    return loop
+
+
+# -- commands -----------------------------------------------------------------
+def _cmd_run(task: str) -> int:
+    if not _api_key():
+        sys.stderr.write(
+            "error: OPENROUTER_API_KEY not set (fail loudly, principle #6)\n"
+            "        export OPENROUTER_API_KEY=... and retry.\n"
+        )
+        return 2
+    loop = _build_loop()
+    answer = loop.run(task)
+    sys.stdout.write(answer.rstrip() + "\n")
+    return 0
+
+
+def _cmd_doctor() -> int:
+    """Check config + every layer; report missing/broken ones. Exit 1 if any fail."""
+    checks: list[tuple[str, bool, str]] = []
+
+    # Config
+    key = _api_key()
+    checks.append((
+        "OPENROUTER_API_KEY", bool(key),
+        "set" if key else "MISSING — export it before `run`",
+    ))
+    # .agent is optional (auto-created on first audit write), so this is
+    # informational only — never a hard failure.
+    checks.append((
+        ".agent dir", True,
+        str(SETTINGS.agent_dir) + ("" if SETTINGS.agent_dir.is_dir() else " (absent — created on first audit write)"),
+    ))
+    checks.append((f"default model", True, SETTINGS.default_model))
+
+    # Each layer imports + constructs? (a broken layer fails loudly here)
+    layer_probes = [
+        ("L0 runtime/context", "pyclaw.runtime.context", "ContextManager"),
+        ("L0 runtime/audit", "pyclaw.runtime.audit", "AuditLog"),
+        ("L0 runtime/hitl", "pyclaw.runtime.hitl", "HITLGate"),
+        ("L1 memory", "pyclaw.memory.loader", "MemoryLoader"),
+        ("L2 skills", "pyclaw.skills.registry", "SkillRegistry"),
+        ("L3 hooks", "pyclaw.hooks.engine", "HookEngine"),
+        ("L4 subagents", "pyclaw.subagents.runner", "SubagentRunner"),
+        ("L5 plugins", "pyclaw.plugins.loader", "PluginLoader"),
+        ("L5 permissions", "pyclaw.plugins.permissions", "PermissionPolicy"),
+        ("core/llm", "pyclaw.core.llm", "OpenRouterProvider"),
+        ("core/loop", "pyclaw.core.loop", "AgentLoop"),
+        ("mcp", "pyclaw.mcp.client", "McpClient"),
+    ]
+    import importlib
+
+    for label, module_name, attr in layer_probes:
+        try:
+            module = importlib.import_module(module_name)
+            getattr(module, attr)
+            checks.append((label, True, "ok"))
+        except Exception as exc:  # noqa: BLE001
+            checks.append((label, False, f"BROKEN: {exc}"))
+
+    # Can we assemble a full loop? (catches stubs that still raise NotImplementedError)
+    try:
+        _build_loop()
+        checks.append(("assemble AgentLoop", True, "ok"))
+    except Exception as exc:  # noqa: BLE001
+        checks.append(("assemble AgentLoop", False, f"FAILED: {exc}"))
+
+    width = max(len(name) for name, _, _ in checks)
+    all_ok = True
+    for name, ok, detail in checks:
+        mark = "PASS" if ok else "FAIL"
+        all_ok = all_ok and ok
+        sys.stdout.write(f"[{mark}] {name.ljust(width)}  {detail}\n")
+
+    sys.stdout.write("\n" + ("doctor: all checks passed\n" if all_ok else "doctor: some checks FAILED\n"))
+    return 0 if all_ok else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -25,14 +180,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "run":
-        # TODO: assemble AgentLoop (llm, hooks, context, audit, hitl,
-        # permissions, memory, skills) from config and run args.task
-        raise NotImplementedError("cli run: assemble AgentLoop and execute (scaffold)")
-
+        return _cmd_run(args.task)
     if args.command == "doctor":
-        # TODO: validate .agent dir, OPENROUTER_API_KEY, hooks/plugins load
-        raise NotImplementedError("cli doctor (scaffold)")
-
+        return _cmd_doctor()
     return 0
 
 

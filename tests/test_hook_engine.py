@@ -165,3 +165,72 @@ def test_bash_runner_empty_stdout_allows() -> None:
     runner = BashRunner()
     res = runner.run("true", _payload())
     assert res.action is HookAction.ALLOW
+
+
+# --- HttpRunner ---------------------------------------------------------------
+def test_http_runner_parses_json(monkeypatch) -> None:
+    from pyclaw.hooks.runners import HttpRunner
+
+    def fake_poster(url, body, timeout):
+        return 200, {"action": "notify", "message": "heads up"}
+
+    runner = HttpRunner(poster=fake_poster)
+    res = runner.run("http://policy/check", _payload())
+    assert res.action is HookAction.NOTIFY
+    assert res.message == "heads up"
+
+
+def test_http_runner_non2xx_is_blocked() -> None:
+    from pyclaw.hooks.runners import HttpRunner
+
+    runner = HttpRunner(poster=lambda url, body, timeout: (503, {}))
+    res = runner.run("http://policy/check", _payload())
+    assert res.action is HookAction.BLOCK
+
+
+def test_http_runner_network_error_is_blocked() -> None:
+    from pyclaw.hooks.runners import HttpRunner
+
+    def boom(url, body, timeout):
+        raise RuntimeError("conn refused")
+
+    res = HttpRunner(poster=boom).run("http://x", _payload())
+    assert res.action is HookAction.BLOCK
+    assert "conn refused" in (res.message or "")
+
+
+# --- LlmRunner (advisory only: never BLOCK/MODIFY) ----------------------------
+class _FakeLLM:
+    def __init__(self, text):
+        self._text = text
+
+    def complete(self, messages, tools=None):
+        class _R:
+            text = self._text
+        return _R()
+
+
+def test_llm_runner_notify() -> None:
+    from pyclaw.hooks.runners import LlmRunner
+
+    res = LlmRunner(provider=_FakeLLM("NOTIFY")).run("classify {tool}", _payload())
+    assert res.action is HookAction.NOTIFY
+
+
+def test_llm_runner_block_is_downgraded_to_allow() -> None:
+    from pyclaw.hooks.runners import LlmRunner
+
+    # even if the model says BLOCK, the runner must not block (principle #1)
+    res = LlmRunner(provider=_FakeLLM("BLOCK")).run("classify {tool}", _payload())
+    assert res.action is HookAction.ALLOW
+
+
+def test_llm_runner_error_is_allow() -> None:
+    from pyclaw.hooks.runners import LlmRunner
+
+    class _Boom:
+        def complete(self, messages, tools=None):
+            raise RuntimeError("model down")
+
+    res = LlmRunner(provider=_Boom()).run("classify {tool}", _payload())
+    assert res.action is HookAction.ALLOW
