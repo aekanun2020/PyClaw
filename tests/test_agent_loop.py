@@ -167,3 +167,26 @@ def test_pretooluse_hook_modifies_args(tmp_path: Path) -> None:
     loop, _ = _build(tmp_path, llm=llm, hooks=eng, tools=_echo_registry(calls))
     loop.run("hi")
     assert calls == [{"path": "/SAFE"}]              # args were rewritten by the hook
+
+
+# --- multi-turn (chat) mode: history persists, system prompt is not duplicated
+def test_multi_turn_preserves_history_single_system(tmp_path: Path) -> None:
+    """Calling run() twice on the same loop must replay the first turn into the
+    second (so the agent 'remembers'), and must NOT re-append the system prompt.
+    """
+    llm = FakeLLM(script=[LLMResponse(text="first answer"),
+                          LLMResponse(text="second answer")])
+    loop, _ = _build(tmp_path, llm=llm)
+
+    assert loop.run("my name is Aekanun") == "first answer"
+    assert loop.run("what is my name?") == "second answer"
+
+    # The second call saw the full prior conversation (multi-turn memory).
+    second_seen = llm.seen_messages[1]
+    roles = [m["role"] for m in second_seen]
+    contents = [m["content"] for m in second_seen]
+    assert roles.count("system") == 1                  # system prompt NOT duplicated
+    assert roles[0] == "system"                        # and it stays first
+    assert "my name is Aekanun" in contents            # turn 1 user msg replayed
+    assert "first answer" in contents                  # turn 1 assistant reply replayed
+    assert "what is my name?" in contents              # turn 2 user msg present

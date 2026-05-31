@@ -79,7 +79,13 @@ class AgentLoop:
     def _run(self, user_request: str, user: str) -> str:
         self.hooks.fire(HookPayload(event=HookEvent.PRE_SESSION, user=user))
 
-        self.context.append(Message(role=Role.SYSTEM, content=self._build_system(user)))
+        # Append the system prompt only when the conversation is empty. In
+        # multi-turn (chat) mode the same context is reused across calls, so a
+        # second SYSTEM message here would duplicate the prompt (and memory /
+        # skills catalog) on every turn. One-shot `run` always starts empty, so
+        # this preserves the existing behaviour while enabling persistent chat.
+        if not self.context.messages:
+            self.context.append(Message(role=Role.SYSTEM, content=self._build_system(user)))
         self.context.append(Message(role=Role.USER, content=user_request))
 
         tool_specs = self.tools.llm_specs()
@@ -91,7 +97,15 @@ class AgentLoop:
             response = self.llm.complete(self._as_llm_messages(), tools=tool_specs)
 
             if not response.tool_calls:
-                return self._finalize(response.text, user)
+                # Record the assistant's final reply so it persists in context.
+                # In multi-turn (chat) mode the next turn replays this history,
+                # so without it the agent would forget its own answers. We store
+                # the *finalized* text (post PreResponse hook) so the persisted
+                # history matches exactly what the user saw. (#bug: plain-text
+                # answers were previously never appended.)
+                final = self._finalize(response.text, user)
+                self.context.append(Message(role=Role.ASSISTANT, content=final))
+                return final
 
             # Record the assistant's tool-call intent in context. We keep the
             # raw tool_calls in meta so _as_llm_messages can replay them to the

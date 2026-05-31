@@ -151,6 +151,61 @@ def _cmd_run(task: str) -> int:
     return 0
 
 
+def _cmd_chat() -> int:
+    """Interactive multi-turn chat (EliteClaw-style).
+
+    Builds the loop + mounts MCP exactly ONCE, then reads requests from stdin
+    in a REPL, reusing the same AgentLoop (and therefore the same conversation
+    context) across turns. This both preserves history between questions and
+    avoids reconnecting to MCP servers on every turn (the one-shot `run` did
+    both per process). Exit with `quit`/`exit`, or Ctrl-D / Ctrl-C.
+    """
+    if not _api_key():
+        sys.stderr.write(
+            "error: OPENROUTER_API_KEY not set (fail loudly, principle #6)\n"
+            "        export OPENROUTER_API_KEY=... and retry.\n"
+        )
+        return 2
+
+    # Build once: this is where MCP servers are dialed and tools registered.
+    loop = _build_loop()
+    mounted = getattr(loop, "_mcp_mounted", [])
+    for m in mounted:
+        sys.stderr.write(
+            f"[mcp] {m.config.name}: {len(m.tool_names)} tool(s) — {', '.join(m.tool_names) or '(none)'}\n"
+        )
+
+    sys.stderr.write(
+        "\nPyClaw chat — multi-turn, history preserved across turns.\n"
+        "Type your request and press Enter. Commands: 'quit' / 'exit' to leave.\n\n"
+    )
+    sys.stderr.flush()
+
+    while True:
+        try:
+            sys.stderr.write("you> ")
+            sys.stderr.flush()
+            line = input()
+        except (EOFError, KeyboardInterrupt):
+            sys.stderr.write("\nbye.\n")
+            return 0
+
+        task = line.strip()
+        if not task:
+            continue
+        if task.lower() in {"quit", "exit", ":q"}:
+            sys.stderr.write("bye.\n")
+            return 0
+
+        try:
+            answer = loop.run(task)
+        except Exception as exc:  # noqa: BLE001 — keep the REPL alive on errors.
+            sys.stderr.write(f"[error] {exc}\n")
+            continue
+        sys.stdout.write(answer.rstrip() + "\n")
+        sys.stdout.flush()
+
+
 def _cmd_doctor() -> int:
     """Check config + every layer; report missing/broken ones. Exit 1 if any fail."""
     checks: list[tuple[str, bool, str]] = []
@@ -231,12 +286,16 @@ def main(argv: list[str] | None = None) -> int:
     run_p = sub.add_parser("run", help="run a task through the agent loop")
     run_p.add_argument("task", help="the task / user request")
 
+    sub.add_parser("chat", help="interactive multi-turn chat with persistent history")
+
     sub.add_parser("doctor", help="check config, .agent layout, and layer wiring")
 
     args = parser.parse_args(argv)
 
     if args.command == "run":
         return _cmd_run(args.task)
+    if args.command == "chat":
+        return _cmd_chat()
     if args.command == "doctor":
         return _cmd_doctor()
     return 0

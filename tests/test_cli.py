@@ -51,6 +51,67 @@ def test_run_executes_with_stubbed_loop(capsys, monkeypatch):
     assert rc == 0
 
 
+def test_chat_repl_multi_turn_and_quit(capsys, monkeypatch):
+    """`chat` builds the loop ONCE and reuses it across stdin lines until quit."""
+    monkeypatch.setattr(cli, "_api_key", lambda: "sk-test")
+
+    builds: list[int] = []
+
+    class FakeLoop:
+        _mcp_mounted: list = []
+
+        def __init__(self):
+            builds.append(1)
+            self.seen: list[str] = []
+
+        def run(self, task, user="user"):
+            self.seen.append(task)
+            return f"reply#{len(self.seen)}: {task}"
+
+    one = FakeLoop.__new__(FakeLoop)
+    one.seen = []
+    one._mcp_mounted = []
+    monkeypatch.setattr(cli, "_build_loop", lambda **kw: (builds.append(1) or one))
+
+    # Two real turns, one blank line (ignored), then quit.
+    lines = iter(["hello", "", "and again", "quit"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(lines))
+
+    rc = cli.main(["chat"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert builds == [1]                       # loop built exactly once (MCP mounted once)
+    assert one.seen == ["hello", "and again"]  # blank line skipped, quit not run
+    assert "reply#1: hello" in out
+    assert "reply#2: and again" in out
+
+
+def test_chat_without_key_fails_fast(capsys, monkeypatch):
+    monkeypatch.setattr(cli, "_api_key", lambda: "")
+    rc = cli.main(["chat"])
+    err = capsys.readouterr().err
+    assert "OPENROUTER_API_KEY not set" in err
+    assert rc == 2
+
+
+def test_chat_eof_exits_cleanly(capsys, monkeypatch):
+    monkeypatch.setattr(cli, "_api_key", lambda: "sk-test")
+
+    class FakeLoop:
+        _mcp_mounted: list = []
+        def run(self, task, user="user"):
+            return "x"
+
+    monkeypatch.setattr(cli, "_build_loop", lambda **kw: FakeLoop())
+
+    def _raise(*a, **k):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _raise)
+    rc = cli.main(["chat"])
+    assert rc == 0  # Ctrl-D exits cleanly
+
+
 def test_no_command_errors():
     with pytest.raises(SystemExit):
         cli.main([])
