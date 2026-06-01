@@ -34,6 +34,16 @@ def test_parse_frontmatter_none() -> None:
     assert body == "no frontmatter here"
 
 
+def test_invocation_always_parses(tmp_path: Path) -> None:
+    """`invocation: always` parses to Invocation.ALWAYS without crashing."""
+    _write_skill(tmp_path, "alwaysone", desc="always on", invocation="always")
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+    meta = reg.get("alwaysone")
+    assert meta is not None
+    assert meta.invocation is Invocation.ALWAYS
+
+
 def test_scan_and_catalog(tmp_path: Path) -> None:
     _write_skill(tmp_path, "alpha", desc="do alpha things")
     _write_skill(tmp_path, "beta", desc="handle beta")
