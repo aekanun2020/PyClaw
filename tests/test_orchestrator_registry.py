@@ -9,7 +9,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pyclaw.orchestrator.registry import AgentRegistry, AgentSpec, load_agents
+from pyclaw.orchestrator.registry import (
+    AgentRegistry,
+    AgentSpec,
+    auto_register_unowned,
+    load_agents,
+)
+
+
+def _registry(*specs: AgentSpec) -> AgentRegistry:
+    reg = AgentRegistry()
+    for spec in specs:
+        reg.add(spec)
+    return reg
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 AGENTS_MD = REPO_ROOT / "AGENTS.md"
@@ -192,3 +204,71 @@ def test_home_override_via_frontmatter(tmp_path):
     agent = reg.get("agent-x")
     assert agent.home == home
     assert "custom-home persona" in (agent.compose_system_prompt() or "")
+
+
+def test_auto_register_creates_agent_for_unowned_prefix():
+    reg = _registry(AgentSpec(name="db-agent", description="d", tool_prefixes=("db_",)))
+    available = ("db_query", "xyz_foo", "xyz_bar")
+    registered = auto_register_unowned(reg, available)
+    assert registered == ["xyz-agent"]
+    auto = reg.get("xyz-agent")
+    assert auto is not None
+    assert auto.tool_prefixes == ("xyz_",)
+    assert auto.resolve_tools(available) == ("xyz_foo", "xyz_bar")
+
+
+def test_auto_register_does_not_touch_owned_prefix():
+    reg = _registry(AgentSpec(name="rag-agent", description="d", tool_prefixes=("rag_",)))
+    before = set(reg.names())
+    registered = auto_register_unowned(reg, ("rag_search", "rag_list_sources"))
+    assert registered == []
+    assert set(reg.names()) == before  # no duplicate rag-agent, no new agent
+
+
+def test_auto_register_skips_tools_without_underscore():
+    reg = _registry(AgentSpec(name="db-agent", description="d", tool_prefixes=("db_",)))
+    registered = auto_register_unowned(reg, ("loose", "_leading"))
+    assert registered == []
+    assert reg.names() == ["db-agent"]  # no bogus agent invented
+
+
+def test_auto_register_skips_name_collision_without_overwriting():
+    existing = AgentSpec(name="xyz-agent", description="explicit desc", tool_prefixes=("abc_",))
+    reg = _registry(existing)
+    warnings: list[str] = []
+    # xyz_foo is unowned (abc_ != xyz_) -> derives name "xyz-agent" which clashes.
+    registered = auto_register_unowned(reg, ("xyz_foo",), warn=warnings.append)
+    assert registered == []
+    assert reg.get("xyz-agent").description == "explicit desc"  # untouched
+    assert any("already exists" in w for w in warnings)
+
+
+def test_auto_register_description_is_factual_and_uses_generic_prompt():
+    reg = _registry(AgentSpec(name="db-agent", description="d", tool_prefixes=("db_",)))
+    auto_register_unowned(reg, ("rag_list_sources", "rag_search_documentation"))
+    auto = reg.get("rag-agent")
+    # Description names the REAL tools (factual), not an invented capability.
+    assert "rag_list_sources" in auto.description
+    assert "rag_search_documentation" in auto.description
+    # No SOUL/TOOLS home -> falls back to the generic subagent prompt.
+    assert auto.home is None
+    assert auto.compose_system_prompt() is None
+
+
+def test_auto_register_noop_when_all_prefixes_owned():
+    reg = _registry(
+        AgentSpec(name="db-agent", description="d", tool_prefixes=("db_",)),
+        AgentSpec(name="rag-agent", description="d", tool_prefixes=("rag_",)),
+    )
+    before = set(reg.names())
+    registered = auto_register_unowned(reg, ("db_query", "rag_search"))
+    assert registered == []
+    assert set(reg.names()) == before
+
+
+def test_owned_prefixes_unions_all_agents():
+    reg = _registry(
+        AgentSpec(name="db-agent", description="d", tool_prefixes=("db_",)),
+        AgentSpec(name="rag-agent", description="d", tool_prefixes=("rag_", "vec_")),
+    )
+    assert reg.owned_prefixes() == {"db_", "rag_", "vec_"}

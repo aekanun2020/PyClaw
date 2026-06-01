@@ -18,6 +18,7 @@ names start with one of its prefixes (e.g. `db_` -> db_execute_query_tool).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -160,6 +161,10 @@ class AgentRegistry:
         lines = [f"- {a.name}: {a.description}" for a in self._agents.values()]
         return "\n".join(lines)
 
+    def owned_prefixes(self) -> set[str]:
+        """The union of every registered agent's tool prefixes."""
+        return {p for a in self._agents.values() for p in a.tool_prefixes}
+
 
 def _find_agents_file(start: Path | None = None) -> Path | None:
     """Walk from `start` upward to find the nearest AGENTS.md (or None)."""
@@ -218,3 +223,83 @@ def _resolve_home(base: Path, name: str, home_override: str | None) -> Path:
         override = Path(home_override)
         return override if override.is_absolute() else (base / override)
     return base / AGENTS_HOME_DIRNAME / name
+
+
+def _derive_prefix(tool_name: str) -> str | None:
+    """Derive a tool-group prefix from a tool name, or None when ambiguous.
+
+    The prefix is everything up to and including the FIRST underscore, e.g.
+    `rag_list_sources` -> `rag_`, `apify_run` -> `apify_`. A tool name with no
+    underscore has no clear group, so we return None and SKIP it rather than
+    guess (principle #3: never invent — leave genuinely ambiguous tools alone).
+    """
+    idx = tool_name.find("_")
+    if idx <= 0:
+        return None
+    return tool_name[: idx + 1]
+
+
+def auto_register_unowned(
+    registry: AgentRegistry,
+    available_tools: tuple[str, ...],
+    *,
+    warn: Callable[[str], None] | None = None,
+) -> list[str]:
+    """Fill registry gaps by registering generic agents for unowned tools.
+
+    AGENTS.md remains the SOURCE OF TRUTH and the explicit override: any tool
+    prefix already owned by an agent declared in AGENTS.md is left untouched.
+    This function only "fills the gaps" — it creates a generic agent for each
+    derived prefix whose tools NO existing agent owns, so a live MCP tool can
+    never float without an owner and cause the orchestrator to misroute.
+
+    It deliberately does NOT invent personas or capabilities (principle #3):
+    the auto agent's description is purely FACTUAL (the prefix + the real tool
+    names that resolved), and it has no SOUL/TOOLS home, so it falls back to the
+    generic subagent prompt (`compose_system_prompt` returns None).
+
+    Returns the names of the agents that were auto-registered (for logging). If
+    `warn` is provided it is called once per auto-registered agent, and once per
+    skipped name collision, with a human-readable message.
+    """
+    # 1. Tools whose prefix no existing agent owns.
+    unowned = [t for t in available_tools if not any(a.owns(t) for a in registry.all())]
+
+    # 2 + 3. Group unowned tools by derived prefix, skipping ambiguous names.
+    grouped: dict[str, list[str]] = {}
+    for tool in unowned:
+        prefix = _derive_prefix(tool)
+        if prefix is None:
+            continue
+        grouped.setdefault(prefix, []).append(tool)
+
+    registered: list[str] = []
+    for prefix, tools in grouped.items():
+        # 4. name = "<prefix without trailing underscore>-agent".
+        name = f"{prefix.rstrip('_')}-agent"
+        if registry.get(name) is not None:
+            # Name collision with an existing (explicit) agent — never overwrite.
+            if warn:
+                warn(
+                    f"skipped auto-register for unowned prefix {prefix!r}: "
+                    f"agent name {name!r} already exists (not overwriting)"
+                )
+            continue
+        tool_list = ", ".join(tools)
+        description = (
+            f"(auto) Agent สำหรับเครื่องมือกลุ่ม {prefix} — tools: {tool_list} "
+            "(ไม่มี SOUL/TOOLS กำหนดเอง ใช้ค่าเริ่มต้น)"
+        )
+        registry.add(
+            AgentSpec(
+                name=name,
+                description=description,
+                tool_prefixes=(prefix,),
+                home=None,
+            )
+        )
+        registered.append(name)
+        if warn:
+            warn(f"auto-registered {name} for unowned tools: {tool_list}")
+
+    return registered
