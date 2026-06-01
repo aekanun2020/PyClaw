@@ -8,13 +8,19 @@ allowed tool group is fixed by AGENTS.md — so this layer reuses
 `pyclaw/subagents/{runner,types,tool,trace}.py` wholesale.
 """
 
-from pyclaw.orchestrator.registry import AgentRegistry, AgentSpec, load_agents
+from pyclaw.orchestrator.registry import (
+    AgentRegistry,
+    AgentSpec,
+    auto_register_unowned,
+    load_agents,
+)
 from pyclaw.orchestrator.runner import OrchestratorRunner
 from pyclaw.orchestrator.tool import ROUTE_TOOL_NAME, make_route_to_agent_tool
 
 __all__ = [
     "AgentRegistry",
     "AgentSpec",
+    "auto_register_unowned",
     "load_agents",
     "OrchestratorRunner",
     "ROUTE_TOOL_NAME",

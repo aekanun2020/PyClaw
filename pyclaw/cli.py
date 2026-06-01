@@ -154,7 +154,12 @@ def _build_orchestrator_loop():
     from pyclaw.core.tools import ToolRegistry
     from pyclaw.hooks import HookEngine
     from pyclaw.memory import MemoryLoader
-    from pyclaw.orchestrator import OrchestratorRunner, load_agents, make_route_to_agent_tool
+    from pyclaw.orchestrator import (
+        OrchestratorRunner,
+        auto_register_unowned,
+        load_agents,
+        make_route_to_agent_tool,
+    )
     from pyclaw.plugins.permissions import PermissionPolicy
     from pyclaw.runtime.audit import AuditLog
     from pyclaw.runtime.context import ContextManager
@@ -173,6 +178,17 @@ def _build_orchestrator_loop():
             "orchestrator mode requires AGENTS.md with at least one agent "
             "(none found — fail loudly, principle #6)"
         )
+
+    # AGENTS.md stays the source of truth (checked above). Auto-register fills
+    # the gaps: any live MCP tool prefix that no declared agent owns gets a
+    # generic agent, so a floating prefix can't cause the orchestrator to
+    # misroute. This must run BEFORE build_routing_prompt so the routing prompt
+    # includes the auto agents.
+    auto_register_unowned(
+        agents,
+        tuple(domain_tools.names()),
+        warn=lambda m: sys.stderr.write(f"[orchestrator] {m}\n"),
+    )
 
     runner = OrchestratorRunner(
         registry=agents,
