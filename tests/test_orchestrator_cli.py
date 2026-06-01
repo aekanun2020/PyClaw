@@ -41,9 +41,10 @@ def test_orchestrator_loop_registry_from_agents_md(monkeypatch):
     monkeypatch.setattr(cli, "_mount_mcp", _register_fake_mcp)
     loop = cli._build_orchestrator_loop()
     agents = loop._orchestrator_agents
-    assert set(agents.names()) == {"db-agent", "pdpa-agent"}
+    assert set(agents.names()) == {"db-agent", "pdpa-agent", "rag-agent"}
     # The system prompt embeds the routing list from AGENTS.md.
     assert "db-agent" in loop.system_prompt and "pdpa-agent" in loop.system_prompt
+    assert "rag-agent" in loop.system_prompt
     assert "route_to_agent" in loop.system_prompt
 
 

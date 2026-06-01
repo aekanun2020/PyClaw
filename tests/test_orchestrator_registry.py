@@ -18,7 +18,25 @@ AGENTS_MD = REPO_ROOT / "AGENTS.md"
 def test_repo_agents_md_exists_and_parses():
     assert AGENTS_MD.is_file(), "AGENTS.md must exist at repo root"
     reg = load_agents(AGENTS_MD)
-    assert set(reg.names()) == {"db-agent", "pdpa-agent"}
+    assert set(reg.names()) == {"db-agent", "pdpa-agent", "rag-agent"}
+
+
+def test_rag_agent_owns_rag_prefix_only():
+    reg = load_agents(AGENTS_MD)
+    rag = reg.get("rag-agent")
+    assert rag is not None
+    assert rag.tool_prefixes == ("rag_",)
+    available = (
+        "rag_add_documentation", "rag_search_documentation",
+        "rag_list_sources", "rag_add_directory",
+        "db_preview_table", "pdpa_search_pdpa",
+    )
+    resolved = rag.resolve_tools(available)
+    assert resolved == (
+        "rag_add_documentation", "rag_search_documentation",
+        "rag_list_sources", "rag_add_directory",
+    )
+    assert "db_preview_table" not in resolved  # no cross-agent leakage
 
 
 def test_db_agent_owns_db_prefix_only():
@@ -104,6 +122,15 @@ def test_repo_pdpa_agent_resolves_soul_and_tools():
     tools_doc = pdpa.load_tools_doc()
     assert soul is not None and "PDPA" in soul
     assert tools_doc is not None and "pdpa_get_penalty" in tools_doc
+
+
+def test_repo_rag_agent_resolves_soul_and_tools():
+    reg = load_agents(AGENTS_MD)
+    rag = reg.get("rag-agent")
+    soul = rag.load_soul()
+    tools_doc = rag.load_tools_doc()
+    assert soul is not None and "RAG" in soul
+    assert tools_doc is not None and "rag_list_sources" in tools_doc
 
 
 def test_compose_system_prompt_contains_soul_tools_and_guardrail():

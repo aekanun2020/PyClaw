@@ -39,3 +39,9 @@ name: pdpa-agent
 description: Thai PDPA (Personal Data Protection Act) law question-and-answer. Use for questions about Thai data-protection law, PDPA sections, penalties, and compliance obligations.
 tools: pdpa_
 ---
+
+---
+name: rag-agent
+description: ค้นหาและจัดการคลังเอกสาร RAG (retrieval-augmented generation). ใช้เมื่อผู้ใช้ถามว่าในคลัง/RAG มีเอกสารหรือแหล่งข้อมูลอะไรบ้าง, ต้องการค้นเนื้อหาจากเอกสารที่จัดเก็บไว้, หรือเพิ่มเอกสาร/ไดเรกทอรีเข้าคลัง. นี่คือคลังเอกสาร ไม่ใช่ฐานข้อมูล SQL — อย่าสับสนกับ db-agent.
+tools: rag_
+---
