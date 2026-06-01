@@ -43,6 +43,7 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
 class Invocation(str, Enum):
     AUTO = "auto"        # selected by semantic auto-detection
     MANUAL = "manual"    # only via /skill-name
+    ALWAYS = "always"    # always injected into the owning agent's system prompt
 
 
 @dataclass

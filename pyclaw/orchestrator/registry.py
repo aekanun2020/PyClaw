@@ -22,7 +22,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pyclaw.skills.registry import parse_frontmatter
+from pyclaw.skills.loader import SkillLoader
+from pyclaw.skills.registry import Invocation, SkillRegistry, parse_frontmatter
 
 # Canonical filename + the directory-walk root behaviour mirrors the memory
 # loader: AGENTS.md is looked up from the working dir upward so a repo-root file
@@ -37,6 +38,11 @@ SOUL_FILENAME = "SOUL.md"
 TOOLS_FILENAME = "TOOLS.md"
 # The directory holding the per-agent folders, relative to AGENTS.md's location.
 AGENTS_HOME_DIRNAME = "agents"
+# Per-agent skills layer: `<home>/skills/**/SKILL.md`. Skills with
+# `invocation: always` are injected into the agent's composed system prompt
+# (between TOOLS.md and the guardrail). AUTO/MANUAL skills are NOT injected here
+# — they are resolved at task time by SkillLoader.
+SKILLS_DIRNAME = "skills"
 
 
 @dataclass
@@ -78,22 +84,54 @@ class AgentSpec:
         """The agent's TOOLS.md body, or None when absent."""
         return self._read_home_file(TOOLS_FILENAME)
 
+    def load_always_skills(self) -> list[tuple[str, str]]:
+        """The `(name, body)` of every ALWAYS-invocation skill under `home/skills/`.
+
+        Scans `<home>/skills/**/SKILL.md` (lazy frontmatter parse), keeps only
+        skills declaring `invocation: always`, and loads their FULL body for
+        injection into the composed system prompt. Skills with AUTO/MANUAL
+        invocation are intentionally skipped here — they are detected at task
+        time by SkillLoader, not baked into the persona.
+
+        Returns an empty list when there is no home, no `skills/` dir, or no
+        ALWAYS skills, so callers see unchanged behaviour (additive only).
+        """
+        if self.home is None:
+            return []
+        skills_root = self.home / SKILLS_DIRNAME
+        if not skills_root.is_dir():
+            return []
+        registry = SkillRegistry()
+        registry.scan(skills_root)
+        loader = SkillLoader(registry)
+        result: list[tuple[str, str]] = []
+        for meta in registry.all():
+            if meta.invocation is not Invocation.ALWAYS:
+                continue
+            result.append((meta.name, loader.load_full(meta)))
+        return result
+
     def compose_system_prompt(self, guardrail: str | None = None) -> str | None:
         """Assemble this agent's per-agent system prompt from SOUL + TOOLS.
 
-        Returns the composed persona (SOUL.md, then TOOLS.md), optionally with
+        Returns the composed persona (SOUL.md, then TOOLS.md, then the bodies of
+        any ALWAYS-invocation skills under `home/skills/`), optionally with
         `guardrail` appended so the generic anti-hallucination protection stays
-        in force as defence in depth (SOUL/TOOLS are ADDITIVE persona, never a
-        replacement for the guardrail or the tool allowlist).
+        in force as defence in depth (SOUL/TOOLS/skills are ADDITIVE persona,
+        never a replacement for the guardrail or the tool allowlist).
 
-        Returns None when NEITHER SOUL.md nor TOOLS.md exists, so the caller can
-        fall back to the current generic subagent prompt with no breakage.
+        Returns None when NEITHER SOUL.md, TOOLS.md, NOR any ALWAYS skill exists,
+        so the caller can fall back to the current generic subagent prompt with
+        no breakage.
         """
         soul = self.load_soul()
         tools_doc = self.load_tools_doc()
-        if soul is None and tools_doc is None:
+        always_skills = self.load_always_skills()
+        if soul is None and tools_doc is None and not always_skills:
             return None
         parts: list[str] = [p for p in (soul, tools_doc) if p]
+        for name, body in always_skills:
+            parts.append(f"## Skill: {name}\n\n{body.strip()}")
         if guardrail:
             parts.append(guardrail.strip())
         return "\n\n".join(parts)
