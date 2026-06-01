@@ -321,6 +321,63 @@ PyClaw อ่านไฟล์นั้นทั้งสำหรับ MCP se
 `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` (เช่น Ollama ที่ `http://host:11434/v1` โดยคีย์เป็น `ollama`)
 และโมเดลจาก `OPENROUTER_MODEL` — รัน `PYCLAW_DOTENV=/path/.env pyclaw doctor` ก่อนเพื่อดูว่าเจอ server อะไรบ้าง
 
+### เลือก LLM backend (3 แบบ)
+
+เพราะ `OPENROUTER_BASE_URL` ตั้งค่าได้ PyClaw จึงชี้ไปที่ endpoint แบบ **OpenAI-compatible**
+ตัวไหนก็ได้โดยไม่ต้องแก้โค้ด — เปลี่ยนแค่ env vars สามตัว (base URL, API key, model)
+ตัวอย่างด้านล่างใช้ `export` ใน shell (ตั้งค่าชั่วคราว) ไม่ต้องแก้ `.env`
+
+**(A) OpenRouter (cloud, จ่ายเงิน)** — คุณภาพสูงสุด:
+
+```bash
+export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+export OPENROUTER_API_KEY="sk-or-..."        # คีย์จาก openrouter.ai/keys
+export PYCLAW_DEFAULT_MODEL="anthropic/claude-sonnet-4.6"
+```
+
+**(B) Ollama (local, ฟรี)** — รันบนเครื่องตัวเอง:
+
+```bash
+export OPENROUTER_BASE_URL="http://localhost:11434/v1"   # หรือ host ของเครื่องที่รัน Ollama
+export OPENROUTER_API_KEY="ollama"                       # ค่าพิเศษ -> ข้าม auth header
+export PYCLAW_DEFAULT_MODEL="<ชื่อโมเดลใน Ollama>"
+```
+
+ค่า API key ที่เป็น `ollama`, `none`, หรือ `local` (รวมถึงค่าว่าง) จะทำให้ provider
+**ข้าม** การส่ง Authorization header — backend แบบ local/Ollama จึงใช้งานได้โดยไม่ต้องมีคีย์จริง
+(ดู `pyclaw/core/llm.py`)
+
+**(C) Google Gemini (ฟรีผ่าน Google AI Studio)** — ใช้ endpoint OpenAI-compatible ของ Google:
+
+```bash
+export OPENROUTER_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai/"
+export OPENROUTER_API_KEY="<Gemini API key จาก aistudio.google.com>"
+export PYCLAW_DEFAULT_MODEL="gemini-2.5-flash"   # หรือ gemini-2.5-pro (ฟรี); gemini-3.1-pro-preview ไม่ฟรี
+```
+
+> Gemini บน OpenRouter เสียเงินทุกรุ่น แต่ผ่าน Google AI Studio มี free tier (rate limit จำกัด);
+> เพราะ base URL ตั้งค่าได้ จึงชี้ไปที่ endpoint OpenAI-compat ของ Google ได้โดยไม่ต้องแก้โค้ด
+
+**ลำดับความสำคัญของโมเดล:** ถ้าตั้งทั้ง `PYCLAW_DEFAULT_MODEL` และ `OPENROUTER_MODEL`,
+ค่า `PYCLAW_DEFAULT_MODEL` จะถูกใช้ (override) — ถ้าไม่ได้ตั้งทั้งคู่จะ fallback ไปที่ default ที่ฝังในโค้ด
+(ดู `pyclaw/config.py`)
+
+> เคล็ดลับ: การ `export` ใน shell ใหม่เป็นการตั้งค่าชั่วคราว ปิด terminal แล้วกลับค่าเดิม
+> เหมาะกับการทดลองสลับโมเดล (A/B) โดยไม่ต้องแก้ `.env`
+
+### โหมดรัน (run modes) — สรุปธงทั้งหมด
+
+| คำสั่ง | ความหมาย | ค่าเริ่มต้น |
+|--------|----------|-------------|
+| `pyclaw run "task"` | งานแบบ one-shot รอบเดียว ไม่มีธงของ chat | — |
+| `pyclaw chat` | แชตหลายเทิร์น (streaming + persistence) | streaming ON |
+| `pyclaw chat --orchestrator` | auto-route ไป specialized agents ตาม AGENTS.md | OFF |
+| `pyclaw chat --trace` | เห็น tool call สด ๆ (อาจเผย PII) | OFF |
+| `pyclaw chat --subagents` | เปิดเครื่องมือ `spawn_subagent` (ใช้ร่วมกับ `--orchestrator` ไม่ได้) | OFF |
+| `pyclaw chat --no-stream` | ปิดการสตรีมโทเค็น | streaming ON |
+| `pyclaw chat --resume SESSION_ID` | ทำแชตเดิมต่อจาก `.agent/sessions/<id>.json` | — |
+| `pyclaw doctor` | ตรวจ config + การเชื่อมต่อทุก layer | — |
+
 ---
 
 ## โครงสร้าง 5-Layer ADK Spec (+ Layer 0)
