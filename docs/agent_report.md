@@ -79,3 +79,32 @@ recover จาก error ได้ 3 ครั้ง รวมถึง query DIS
 ## ข้อสังเกตเพิ่มเติม
 
 SOUL.md และ TOOLS.md ที่ปรับในระหว่างการทดสอบช่วยในบางจุด โดยเฉพาะ reasoning integrity (โจทย์ 3 สรุปถูกขึ้น) และ unit awareness แต่ปัญหาหลักของโจทย์ 2, 4, 5 ถูกแก้จาก code patch ใน cli.py ไม่ใช่จาก prompt engineering เพียงอย่างเดียว
+
+---
+
+## การเทียบสองโมเดล (หลัง git pull) — เพิ่มเติม 1 มิ.ย. 2569
+
+หลัง merge โค้ดแก้ (PR #11 numeric-transform discipline ใน `agents/db-agent/skills/live-schema-discipline/SKILL.md` + PR #12 orchestrator guard ใน `pyclaw/cli.py`) ทดสอบชุดโจทย์เดิมซ้ำด้วยสองโมเดลผ่าน backend แบบ OpenAI-compatible เดียวกัน เพื่อแยกว่าปัญหาที่เหลือเป็นเรื่อง "โค้ด/skill ของ agent" หรือ "ความสามารถในการทำตาม instruction ของตัวโมเดล"
+
+- **claude-sonnet-4.6** (OpenRouter)
+- **qwen3.5:35b-a3b-coding-nvfp4** (Ollama, self-host)
+
+ผลประเมินใช้ ground truth จาก Claude Desktop ที่ต่อ MCP db (mssql) ตัวเดียวกับ agent
+
+| โจทย์ | claude-sonnet-4.6 | qwen3.5 | สาเหตุที่ qwen ตก |
+|-------|-------------------|---------|-------------------|
+| 1 (Medium) | ✅ ผ่าน — ตัวเลขถูกทุก row, recover จาก syntax error ได้เอง | ✅ ผ่าน | — |
+| 2 (Hard) | ✅ ผ่าน — ใช้ bad_loan_rate ค่าดิบ ไม่ normalize เพิ่ม ไม่มีปีน่าเป็นห่วง | ❌ ไม่ผ่าน | ใช้ `PERCENT_RANK() ORDER BY ... DESC` แทน ASC → volume_percentile พลิกกลับทั้งหมด (logic error) |
+| 3 (Hard) | ✅ ผ่าน — ตัวเลขถูกทุก metric สรุปชนะ/แพ้ถูก | ✅ ผ่าน | — |
+| 4 (Expert) | ✅ ผ่าน — composite_score อยู่ใน 0–1 operator precedence ถูก top 3 ตรง ground truth | ❌ ไม่ผ่าน | วงเล็บหายใน safety term `(1 - x/max) × weight` → composite_score เกิน 1 (bug เดียวกับที่ Claude เคยทำก่อน git pull) |
+| 5 (Expert) | ✅ ผ่าน — รัน query จริง NTILE ถูก กรอง NULL ก่อน สรุป Q4 < Q1 ถูกทุก group ที่มี sample พอ | ❌ ไม่ผ่าน | เขียน SQL แต่ไม่รัน แต่งตัวเลขขึ้นมาแล้วถามกลับว่าให้รันไหม (hallucination แบบเดียวกับที่ Claude เคยทำก่อน git pull) |
+| **รวม** | **5/5** | **2/5** | |
+
+### ข้อสรุปหลัก
+
+> **โมเดลที่ต่างกัน ทำให้ผลต่างกันได้ — ถึงแม้จะรันบนโค้ด/skill ชุดเดียวกัน, โจทย์เดียวกัน, และ ground truth เดียวกัน — claude-sonnet-4.6 ผ่าน 5/5 แต่ qwen3.5 ผ่านเพียง 2/5 ความสามารถในการทำตาม instruction ของตัวโมเดลเองจึงเป็นตัวแปรสำคัญของผลลัพธ์ ไม่ใช่แค่โค้ดของ agent**
+
+1. **โค้ด/skill ที่ merge แล้วถูกต้อง** — Claude Sonnet 4.6 ทำตาม spec ได้ครบ 5/5 ยืนยันว่า PR #11/#12 แก้ปัญหาที่ตั้งใจได้จริง
+2. **ปัญหาที่เหลือของ qwen3.5 เป็นเรื่อง instruction-following ของตัวโมเดล** ไม่ใช่ bug ของ agent layer — ตรงกับหลัก PyClaw "Prompt ≠ Policy": กฎที่เป็นเพียงข้อความใน prompt/skill โมเดลที่อ่อนกว่าอาจไม่ทำตามอย่างเคร่งครัด
+3. **ข้อ 4 (operator precedence ในรูป `(1 - x/max) × weight`) เป็น pattern ที่ LLM พลาดบ่อย** — เกิดกับทั้งสองโมเดล (Claude เคยพลาดก่อน git pull, qwen ยังพลาดอยู่) repo ยังไม่มี rule ตรง ๆ เรื่อง precedence; ที่ Claude ผ่านหลัง git pull น่าจะเป็นผลพลอยได้จาก orchestrator guard ใน PR #12 ("ทำตามสูตรตามที่ระบุ") มากกว่าจะมีกฎเฉพาะ
+4. **ข้อเสนอ (ยังไม่ได้ดำเนินการ):** หากต้องการให้โมเดลที่อ่อนกว่าผ่านด้วย อาจเสริมกฎใน `live-schema-discipline/SKILL.md` 3 จุด — (ก) ทิศทาง PERCENT_RANK (ข) ครอบวงเล็บใน normalize term + ตรวจ score อยู่ใน 0–1 ก่อนตอบ (ค) ย้ำ must-execute query ก่อนสรุปตัวเลข
