@@ -266,6 +266,107 @@ def test_auto_register_noop_when_all_prefixes_owned():
     assert set(reg.names()) == before
 
 
+# -- Per-agent skills/ layer (Feature: ALWAYS-invocation injection) -----------
+def _write_always_skill(home: Path, name: str, body: str) -> None:
+    d = home / "skills" / name
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: d\ninvocation: always\n---\n\n{body}\n",
+        encoding="utf-8",
+    )
+
+
+def test_compose_without_skills_dir_is_unchanged(tmp_path):
+    """An agent with SOUL+TOOLS but no skills/ dir composes identically to before."""
+    f = tmp_path / "AGENTS.md"
+    f.write_text("---\nname: a\ndescription: d\ntools: x_\n---\n", encoding="utf-8")
+    home = tmp_path / "agents" / "a"
+    home.mkdir(parents=True)
+    (home / "SOUL.md").write_text("SOUL body", encoding="utf-8")
+    (home / "TOOLS.md").write_text("TOOLS body", encoding="utf-8")
+    reg = load_agents(f)
+    spec = reg.get("a")
+    assert spec.load_always_skills() == []
+    assert spec.compose_system_prompt(guardrail="G") == "SOUL body\n\nTOOLS body\n\nG"
+
+
+def test_compose_no_soul_tools_no_always_skills_returns_none(tmp_path):
+    """No SOUL, no TOOLS, and no ALWAYS skills -> None (generic fallback)."""
+    f = tmp_path / "AGENTS.md"
+    f.write_text("---\nname: bare\ndescription: d\ntools: x_\n---\n", encoding="utf-8")
+    reg = load_agents(f)
+    assert reg.get("bare").compose_system_prompt(guardrail="g") is None
+
+
+def test_always_skill_injected_after_tools_before_guardrail(tmp_path):
+    f = tmp_path / "AGENTS.md"
+    f.write_text("---\nname: a\ndescription: d\ntools: x_\n---\n", encoding="utf-8")
+    home = tmp_path / "agents" / "a"
+    home.mkdir(parents=True)
+    (home / "SOUL.md").write_text("SOUL body", encoding="utf-8")
+    (home / "TOOLS.md").write_text("TOOLS body", encoding="utf-8")
+    _write_always_skill(home, "rule", "ALWAYS skill body")
+    reg = load_agents(f)
+    prompt = reg.get("a").compose_system_prompt(guardrail="GUARD")
+    assert prompt is not None
+    assert "## Skill: rule" in prompt
+    assert "ALWAYS skill body" in prompt
+    # Ordering: TOOLS < skill body < guardrail.
+    assert prompt.index("TOOLS body") < prompt.index("ALWAYS skill body")
+    assert prompt.index("ALWAYS skill body") < prompt.index("GUARD")
+
+
+def test_always_skill_alone_composes_even_without_soul_tools(tmp_path):
+    """An ALWAYS skill is enough to produce a prompt (no SOUL/TOOLS needed)."""
+    f = tmp_path / "AGENTS.md"
+    f.write_text("---\nname: a\ndescription: d\ntools: x_\n---\n", encoding="utf-8")
+    home = tmp_path / "agents" / "a"
+    home.mkdir(parents=True)
+    _write_always_skill(home, "rule", "ALWAYS skill body")
+    reg = load_agents(f)
+    prompt = reg.get("a").compose_system_prompt()
+    assert prompt is not None and "ALWAYS skill body" in prompt
+
+
+def test_auto_manual_skills_not_injected(tmp_path):
+    """AUTO/MANUAL skills must NOT be baked into compose_system_prompt."""
+    f = tmp_path / "AGENTS.md"
+    f.write_text("---\nname: a\ndescription: d\ntools: x_\n---\n", encoding="utf-8")
+    home = tmp_path / "agents" / "a"
+    (home / "skills" / "autoskill").mkdir(parents=True)
+    (home / "skills" / "autoskill" / "SKILL.md").write_text(
+        "---\nname: autoskill\ndescription: d\ninvocation: auto\n---\n\nAUTO body\n",
+        encoding="utf-8",
+    )
+    (home / "skills" / "manualskill").mkdir(parents=True)
+    (home / "skills" / "manualskill" / "SKILL.md").write_text(
+        "---\nname: manualskill\ndescription: d\ninvocation: manual\n---\n\nMANUAL body\n",
+        encoding="utf-8",
+    )
+    (home / "SOUL.md").write_text("SOUL body", encoding="utf-8")
+    reg = load_agents(f)
+    spec = reg.get("a")
+    assert spec.load_always_skills() == []
+    prompt = spec.compose_system_prompt()
+    assert "AUTO body" not in prompt
+    assert "MANUAL body" not in prompt
+
+
+def test_repo_db_agent_injects_live_schema_discipline():
+    """e2e: the real db-agent prompt contains the live-schema-discipline body,
+    positioned after the TOOLS.md content."""
+    reg = load_agents(AGENTS_MD)
+    prompt = reg.get("db-agent").compose_system_prompt(guardrail="DO NOT invent data.")
+    assert prompt is not None
+    assert "## Skill: live-schema-discipline" in prompt
+    assert "db_get_database_context" in prompt
+    assert "กฎเหล็ก" in prompt
+    # Skill body lands after the TOOLS.md content (db_preview_table is a TOOLS rule).
+    assert prompt.index("db_preview_table") < prompt.index("กฎเหล็ก")
+    # ...and the guardrail still trails everything.
+    assert prompt.index("กฎเหล็ก") < prompt.index("DO NOT invent data.")
+
+
 def test_owned_prefixes_unions_all_agents():
     reg = _registry(
         AgentSpec(name="db-agent", description="d", tool_prefixes=("db_",)),
