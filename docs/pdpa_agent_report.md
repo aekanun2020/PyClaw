@@ -1,7 +1,7 @@
 # PDPA Agent Evaluation Report — Grounding Discipline
 **วันที่วินิจฉัย:** 21 มิถุนายน 2569
 **Agent:** `agents/pdpa-agent/` (SOUL.md + TOOLS.md + skills/pdpa-grounding-discipline)
-**MCP tools:** `pdpa_search_pdpa`, `pdpa_get_related_sections`, `pdpa_get_penalty`
+**MCP tools:** `pdpa_search_pdpa`, `pdpa_get_related_sections`, `pdpa_get_penalty`, `pdpa_get_section_text` *(เพิ่มใหม่ 21 มิ.ย. 2569 — แก้ราก H3)*
 **Knowledge base:** PDPA Knowledge Graph (Sections / Exemptions / LawfulBasis / Penalty nodes + edges)
 **ชุดทดสอบ:** CCTV Benchmark 3 ระดับ (เก็บ → ใช้สอบสวน → ใช้การตลาด) — spec อยู่ใน [`pdpa_cctv_benchmark.md`](../pdpa_cctv_benchmark.md)
 
@@ -60,6 +60,40 @@
 | `find_related_sections` คืน text ไหม? | ❌ จงใจไม่คืน (คืนแค่ edge + description) |
 | `search_pdpa` ขอตัวบทเจาะจง section_id ได้ไหม? | ❌ ได้แค่ top-5 semantic ไม่ใช่ by-id |
 | ต้องเขียน tool ใหม่ยากไหม? | 🟢 ง่ายมาก — lookup node by id (reuse fuzzy-match จาก `find_related_sections`) แล้วคืน `node_data['text']` (~10 บรรทัด) |
+
+---
+
+## 🟢 อัปเดต 21 มิ.ย. 2569 — ผลหลังเพิ่ม `get_section_text` (Arm B: prompt เดิม + tool ใหม่)
+
+หลัง implement `get_section_text(section_id)` เป็น MCP Tool ตัวที่ 5 และ rebuild container บนเครื่อง user แล้ว (verified live: `tools/list` แสดง 5 tools, curl test `"27"`→sec_27 และ `sec_999`→`found:false` ผ่านทั้งคู่) — รัน **Q-CCTV-2 ซ้ำ 1 รอบบน `anthropic/claude-sonnet-4.6`** โดย **ยังไม่แก้ TOOLS.md / SKILL.md** (agent ยังไม่ "รู้จัก" tool ใหม่อย่างเป็นทางการ)
+
+### ผลพลิก: Q-CCTV-2 เปลี่ยนจาก ❌ → ✅ ทุกตัวชี้วัด grounding
+
+| ตัวชี้วัด | baseline (ก่อนมี tool) | หลังเพิ่ม tool (Arm B) |
+|---|:---:|:---:|
+| TRACE_OK | ✅ | ✅ |
+| RETRIEVE_OK | ❌ | **✅** |
+| GROUND_OK | ❌ | **✅** |
+| Legal Correct | ✅ | ✅ |
+
+### หลักฐานสำคัญ (smoking gun ถูกแก้)
+รอบ baseline: agent เห็น edge `sec_27 → sec_39` แต่ไม่มี tool ดึงตัวบท → quote "ม.39(6)" จากความจำ
+รอบนี้: agent **เรียก `get_section_text` 6 ครั้งเองโดยอัตโนมัติ** (sec_27, sec_24, sec_39, sec_23, sec_32, sec_37, sec_21) ทั้งที่ TOOLS.md/SKILL.md ยังไม่กล่าวถึง tool ตัวนี้เลย — แรงพอจาก docstring ในตัว tool เอง (`★ ใช้ tool นี้ทุกครั้งก่อนอ้างมาตรา`)
+
+- `get_section_text('sec_39')` คืนตัวบทจริงที่มีข้อความ **"(๖) การใช้หรือเปิดเผยตามมาตรา ๒๗ วรรคสาม"** → agent ground ม.39(6) จากหลักฐานจริง (ไม่ใช่ความจำ)
+- คำตอบกฎหมายถูกครบ: collect=ม.24(5), use=ม.27วรรคหนึ่ง (compatible purpose), ROPA=ม.27วรรคสาม→ม.39, + ม.23/32/37, อ้าง ม.21 เป็น purpose-limitation ไม่ใช่ฐาน (ผ่าน GATE ม.21)
+
+### ลำดับการเรียก tool (11 calls รอบนี้)
+`search_pdpa` ×3 (ม.27/ม.24/CCTV) → `get_related_sections(sec_27)` [เห็น edge sec_27→sec_39] → `get_related_sections(sec_24)` → `get_penalty(sec_27)` → **`get_section_text` ×6** (sec_27, sec_24, sec_39, sec_23, sec_32, sec_37, sec_21)
+
+### นัยต่อ hypothesis
+- **H3 (missing-tool): ยืนยัน + แก้สำเร็จด้วย tool อย่างเดียว** — RETRIEVE_OK และ GROUND_OK พลิกเป็น ✅ ทันทีที่มี tool โดยไม่ต้องแตะ prompt เลย
+- **H2 (compliance): อ่อนลงอีก** — agent เรียก tool ใหม่เองโดยไม่ถูกสั่งใน skill เลย → ยืนยันว่าไม่ใช่ปัญหา "ขี้เกียจเรียก tool"
+
+### ⚠️ ข้อจำกัดของผลรอบนี้
+- รันเพียง **1 รอบ บน Sonnet เท่านั้น** — spec กำหนด **≥ 5 รอบต่อโมเดล (Sonnet + Qwen)** เพื่อยืนยัน consistency ก่อนสรุปเป็น regression baseline ทางการ
+- Step 2 (แก้ SKILL.md + TOOLS.md ผูก tool อย่างเป็นทางการ) ยังแนะนำให้ทำต่อ — เพื่อ (ก) documentation, (ข) เสถียรภาพแบบ deterministic ไม่พึ่ง docstring อย่างเดียว
+- Step 3 (citation-grounding Hook) ยังจำเป็นตามหลัก "must-happen-every-time = Hook" — docstring แรงพอใน 1 รอบ แต่ไม่การันตีทุกรอบ/ทุกโมเดล
 
 ---
 
