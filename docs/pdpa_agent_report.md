@@ -36,7 +36,30 @@
 | `pdpa_get_related_sections` | **edge เปล่า** เช่น `sec_27 → sec_39` (by design) | ❌ บอกแค่ "โยงไปไหน" ไม่บอก "เขียนว่าอะไร" |
 | `pdpa_get_penalty` | ข้อความโทษ (penalty node) | ⚠️ ได้เฉพาะโทษ ไม่ใช่ตัวมาตรา |
 
-ตัวบทที่ "ดึงได้จริง" มีแค่ข้อความโทษ (`get_penalty`) และ `description` ของ exemption node (sec24_ex*) ที่บังเอิญติดมากับ edge — **ไม่มี tool ใดคืนตัวบทของมาตราหลัก** (ม.19, 23, 27, 39 วรรคต่าง ๆ) ได้เลย นี่คือช่องว่างที่ `get_section_text(section_id)` ต้องอุด
+ตัวบทที่ "ดึงได้จริง" มีแค่ข้อความโทษ (`get_penalty`) และ `description` ของ exemption node (sec24_ex*) ที่บังเอิญติดมากับ edge — **ไม่มี tool ใดคืนตัวบทของมาตราหลัก** (ม.19, 23, 27, 39 วรรคต่าง ๆ) ได้แบบเจาะจง section_id นี่คือช่องว่างที่ `get_section_text(section_id)` ต้องอุด
+
+---
+
+## ยืนยันจากซอร์สโค้ด MCP server จริง (repo `aekanun2020/2026-GraphRAG-PDPA`)
+
+ตรวจซอร์สของ MCP server (FastMCP, port 8100/mcp) เพื่อยืนยันรากปัญหาก่อนร่าง spec — พบหลักฐานชัดเจน:
+
+### หลักฐาน 1: ตัวบทมาตรา "มีอยู่ครบแล้ว" ใน knowledge graph
+`data/pdpa_knowledge_graph.json`: node label `Section` มี **96 ตัว และทุกตัวมี field `text` เป็นตัวบทต้นฉบับ (96/96, ไม่มีตัวไหนว่าง)** ความยาว median ~697 ตัวอักษร (สูงสุด 3000) เช่น `sec_27.text`, `sec_39.text`, `sec_24.text`, `sec_19.text` มีตัวบทเต็ม → **ปัญหาไม่ใช่ "ไม่มีข้อมูล" แต่คือ "ไม่มี tool เปิดอ่านข้อมูลแบบเจาะจง section_id"**
+
+### หลักฐาน 2: tool ที่มีอยู่ "จงใจ" ไม่คืน field `text`
+`lightrag/main.py → find_related_sections()` (บรรทัด 115-123) อ่าน `node_data` แต่คืนเฉพาะ `type`/`description`/`label` + edges — **ไม่เคยแตะ field `text`** จึงได้ edge เปล่าตามที่ benchmark เจอ
+
+### หลักฐาน 3: `search_pdpa` คืนตัวบทแบบ semantic top-5 เท่านั้น (ไม่ใช่ by-id)
+ตาม `docs/search_pdpa_pipeline.md`: Step 3 (chunk search) คืน original text ของมาตราที่ **ใกล้เคียงเชิงความหมาย** สูงสุด 5 ตัวผ่าน Qdrant similarity — **ไม่รองรับการขอ "ตัวบทของมาตรา X เป๊ะ ๆ"** จึงเป็นเหตุผลที่ค้น "มาตรา 27" แล้วได้ ม.26/79/24 (เพื่อนบ้านเชิง semantic) แทนตัว ม.27
+
+### สรุปข้อยืนยัน
+| คำถาม | คำตอบจากซอร์สจริง |
+|---|---|
+| ตัวบทมาตราอยู่ในระบบไหม? | ✅ มีครบ 96/96 ใน `node.text` |
+| `find_related_sections` คืน text ไหม? | ❌ จงใจไม่คืน (คืนแค่ edge + description) |
+| `search_pdpa` ขอตัวบทเจาะจง section_id ได้ไหม? | ❌ ได้แค่ top-5 semantic ไม่ใช่ by-id |
+| ต้องเขียน tool ใหม่ยากไหม? | 🟢 ง่ายมาก — lookup node by id (reuse fuzzy-match จาก `find_related_sections`) แล้วคืน `node_data['text']` (~10 บรรทัด) |
 
 ---
 
