@@ -1,0 +1,119 @@
+# PDPA Agent Evaluation Report — Grounding Discipline
+**วันที่วินิจฉัย:** 21 มิถุนายน 2569
+**Agent:** `agents/pdpa-agent/` (SOUL.md + TOOLS.md + skills/pdpa-grounding-discipline)
+**MCP tools:** `pdpa_search_pdpa`, `pdpa_get_related_sections`, `pdpa_get_penalty`
+**Knowledge base:** PDPA Knowledge Graph (Sections / Exemptions / LawfulBasis / Penalty nodes + edges)
+**ชุดทดสอบ:** CCTV Benchmark 3 ระดับ (เก็บ → ใช้สอบสวน → ใช้การตลาด) — spec อยู่ใน [`pdpa_cctv_benchmark.md`](../pdpa_cctv_benchmark.md)
+
+---
+
+## บทสรุปผู้บริหาร (TL;DR)
+
+**ปัญหาหลัก = H3 (missing-tool): agent ไม่มีเครื่องมือดึง "ตัวบทมาตรา" มาอ่าน**
+
+ไม่ใช่ปัญหาที่โมเดลตอบผิดกฎหมาย ไม่ใช่ skill เขียนไม่ครอบคลุม และไม่ใช่โมเดลขี้เกียจเรียก tool — แต่เป็นเพราะ **ไม่มี tool ตัวใดคืน original text ของ node มาตราเป้าหมาย** agent จึงเห็นความเชื่อมโยง (edge) แต่ "ตามรอยไปอ่านเนื้อหาต่อไม่ได้" และต้องเติมตัวบทจากความจำ → ตอบถูกกฎหมายแต่ผิดวินัย grounding ทุกครั้ง
+
+**สิ่งที่ต้องทำ (ตามลำดับ):**
+1. เพิ่ม MCP tool **`get_section_text(section_id)`** ที่คืนตัวบทจริงของมาตรา — **แก้ที่ราก ต้องมาก่อน**
+2. ผูก **citation-grounding Hook** — บังคับว่าทุกมาตราที่อ้างต้อง map กับ retrieved text (ทำได้หลังมี tool แล้วเท่านั้น)
+3. แก้ wording ของ SKILL.md (item 5 + เพิ่ม gate "edge = pointer ไม่ใช่หลักฐาน") — secondary เพราะ legal reasoning ถูกอยู่แล้ว
+
+---
+
+## อาการ: "เห็นแต่ตามรอยต่อไม่ได้" (Q15 → CCTV)
+
+อาการนี้พบครั้งแรกในเคส Q15 (edge `sec_30 → sec_24`) และเกิดซ้ำทุกครั้งในรูปแบบเดียวกัน:
+
+1. agent **เห็น** edge เช่น `sec_27 → sec_39 (REFERENCES_SECTION)` จาก `pdpa_get_related_sections` (เห็น pointer)
+2. agent **อยากอ่าน** ตัวบท ม.39 ว่าเขียนว่าอะไร — แต่ **ไม่มี tool ให้เรียก** (ไม่มี `get_section_text`)
+3. agent จึง **เติมตัวบท ม.39 จากความจำ** → คำตอบถูกกฎหมาย แต่ตัวบทไม่ได้มาจาก tool result
+
+### ทำไม tool ปัจจุบันไม่พอ
+
+| tool | คืนอะไร | ดึงตัวบทมาตราหลักได้ไหม |
+|---|---|:---:|
+| `pdpa_search_pdpa` | chunk / exemption ที่ใกล้เคียง (semantic search) | ❌ คืนของใกล้เคียง ไม่ใช่ตัวบทมาตราเป้าหมายเป๊ะ |
+| `pdpa_get_related_sections` | **edge เปล่า** เช่น `sec_27 → sec_39` (by design) | ❌ บอกแค่ "โยงไปไหน" ไม่บอก "เขียนว่าอะไร" |
+| `pdpa_get_penalty` | ข้อความโทษ (penalty node) | ⚠️ ได้เฉพาะโทษ ไม่ใช่ตัวมาตรา |
+
+ตัวบทที่ "ดึงได้จริง" มีแค่ข้อความโทษ (`get_penalty`) และ `description` ของ exemption node (sec24_ex*) ที่บังเอิญติดมากับ edge — **ไม่มี tool ใดคืนตัวบทของมาตราหลัก** (ม.19, 23, 27, 39 วรรคต่าง ๆ) ได้เลย นี่คือช่องว่างที่ `get_section_text(section_id)` ต้องอุด
+
+---
+
+## ผลการทดสอบ CCTV Benchmark (baseline — ก่อนแก้ไข)
+
+แต่ละข้อรันแบบ cold start แยก session ประเมิน 2 มิติอิสระ: A = Legal Correctness, B = Grounding Discipline
+ตัวชี้วัด: **TRACE_OK** (พยายามเรียก tool retrieve เป้าหมายไหม) · **RETRIEVE_OK** (tool คืน original text เป้าหมายไหม) · **GROUND_OK** (ทุกตัวบทที่อ้าง map กับ retrieved text ไหม)
+
+| คำถาม | TRACE_OK | RETRIEVE_OK | GROUND_OK | Legal | รากปัญหา |
+|---|:---:|:---:|:---:|:---:|---|
+| Q-CCTV-1 (เก็บ) | ✅* | ❌ | ❌ | ✅ | H3 + H2 (บางมาตราอ้างโดยไม่ call) |
+| Q-CCTV-2 (สอบสวน) | ✅ | ❌ | ❌ | ✅ | **H3 ชัดเจน** |
+| Q-CCTV-3 (การตลาด) | ✅ | ⚠️ บางส่วน | ❌ | ✅ | **H3 หลัก** |
+
+### Q-CCTV-1 — การเก็บข้อมูล (Collect)
+- **Legal ✅:** วินิจฉัยฐานเก็บ = ม.24(5) legitimate interest, ไม่ต้องขอ consent, แยก collect/use ถูก, ไม่ละเมิด GATE ม.21
+- **Grounding ❌:** (ก) ค้น "มาตรา 27" แต่ tool คืน ม.26/79/24 แทน = H3 (ค้นด้วยเลขมาตราไม่เสถียร เหมือนเคส ม.82→ม.90 เดิม); (ข) ม.39/23/22/37/32/19 ถูกอ้างโดย **ไม่มี tool call เลย** = H2 (เติมจากความจำ)
+
+### Q-CCTV-2 — การนำไปใช้สอบสวน (Use — compatible purpose)
+- **Legal ✅:** การสอบสวน = การใช้ → วินิจฉัยภายใต้ ม.27, compatible purpose ใช้ได้ตาม ม.27 วรรคหนึ่ง, มีหน้าที่บันทึก ROPA ตาม ม.27 วรรคสาม → ม.39(6)
+- **Grounding ❌ (smoking gun):** เรียก `get_related_sections(sec_27)` เห็น edge `sec_27 → sec_39` แล้ว **แต่ไม่มี tool retrieve ตัวบท ม.39** → quote "ม.39(6)" จากความจำ = อาการ Q15 ซ้ำเป๊ะ
+- รอบนี้ **TRACE ดีกว่า** Q-CCTV-1 (เรียก get_related ครบ) → เป็น **H3 ล้วน ๆ** น้อย H2
+
+### Q-CCTV-3 — การใช้เพื่อการตลาด (Use — new purpose)
+- **Legal ✅ (เด่นสุด):** โฆษณา = new purpose, ต้องขอ consent ใหม่ตาม ม.27 วรรคหนึ่ง + ม.19, **GATE ม.21 ผ่าน** (ไม่อ้าง ม.21 เป็นฐานเลย), เพิ่มสิทธิ ม.32(2) direct marketing objection ตรงบริบท
+- **Grounding ❌:** เรียก tool **8 ครั้ง** (ขยันที่สุดในสามข้อ) แต่ tool คืนได้แค่ penalty (ม.79) + exemption text ม.24 — ส่วน **ตัวบท ม.19/23/39/30-36/83/84 เติมจากความจำทั้งหมด**
+
+#### Q-CCTV-3: แยกตัวบท grounded vs memory-filled
+| ตัวบทในคำตอบ | มาจาก tool? | สถานะ |
+|---|:---:|---|
+| โทษ ม.79 (6 ด./500k + 1 ปี/1M) | ✅ `get_penalty(sec_27)` | GROUNDED |
+| ม.24(5) legitimate interest | ✅ `get_related(sec_24)` description | GROUNDED |
+| ม.19 (ชัดแจ้ง/แยกส่วน/ถอนได้/วรรคห้า) | ❌ คืนแค่ `sec_19 → DEFINES → def_consent` | MEMORY |
+| ม.23 (รายการแจ้ง) | ❌ ไม่มี tool คืน | MEMORY |
+| ม.39 (ROPA 8 รายการ + วรรคสาม) | ❌ ไม่มี original text | MEMORY |
+| ม.32(2)/33/34 (สิทธิ) | ❌ คืนแค่ edge `HAS_RIGHT` | MEMORY |
+| ม.73 ร้องเรียน | ❌ คืนแค่ `right_complaint → sec_73` | MEMORY |
+| ม.83/84 ปรับปกครอง 5M | ❌ ไม่มี tool คืน | MEMORY |
+
+---
+
+## วินิจฉัยรากปัญหา — ตัด hypothesis อื่นทีละตัว
+
+| สมมติฐาน | ผล | เหตุผล |
+|---|:---:|---|
+| **H4** skill ครอบคลุมไม่พอ (overfit/coverage gap) | ❌ ตัดออก | CCTV คือ pattern เดียวที่ skill ออกแบบ decision tree มาตรง ๆ และ agent ตอบ **ถูกกฎหมายทั้ง 3 ข้อ** (แยก collect/use, compatible vs new purpose, GATE ม.21 ผ่าน) → skill ครอบคลุมแล้ว |
+| **H2** โมเดลไม่ยอมเรียก tool (compliance) | ⚠️ อ่อนลงมาก | Q-CCTV-3 เรียก tool 8 ครั้ง, Q-CCTV-2 ตามรอย edge ครบ → ไม่ใช่ "ขี้เกียจ" แต่คือ "เรียกแล้วไม่มีตัวบทให้ดึง" (เหลือ H2 เฉพาะกรณี Q-CCTV-1 ที่อ้างบางมาตราโดยไม่ call) |
+| **H1** prompt มีช่องว่าง (item 5 บอก "cite" ไม่ใช่ "retrieve") | ⚠️ รอง | มีส่วนจริง แต่แก้ wording อย่างเดียวไม่พอถ้าไม่มี tool ให้ดึง |
+| **H3** ไม่มี tool ดึงตัวบทมาตรา (missing-tool) | ✅ **ยืนยัน** | เกิดซ้ำ **4 รอบติด**: ม.82→90, CCTV-1, CCTV-2, CCTV-3 — `search` คืน chunk ใกล้เคียง, `get_related` คืน edge เปล่า, ไม่มีตัวไหนคืน node text |
+
+### ตรรกะการแยก H2 vs H3 (เส้นแบ่งที่คมที่สุด)
+- **TRACE_OK ❌** → โมเดลเลือกไม่เรียก tool เอง = H2 compliance
+- **TRACE_OK ✅ แต่ RETRIEVE_OK ❌** → โมเดลพยายามแล้วแต่เครื่องมือไม่เอื้อ = **H3 missing-tool**
+
+ผลทั้ง 3 ข้อตกในแถว H3 (TRACE ✅ / RETRIEVE ❌)
+
+---
+
+## ข้อเสนอการแก้ไข (fix priority)
+
+1. **`get_section_text(section_id)` — ต้องมาก่อนทุกอย่าง (root H3)**
+   - คืน original text ของ node มาตรา (รวมวรรคย่อย) ตาม section_id
+   - เหตุผล: แม้ agent จะ trace ครบ (8 calls ใน Q3) ก็ยัง ground ไม่ได้ถ้าไม่มีตัวบทให้ดึง
+   - พิจารณา retrofit `pdpa_get_related_sections` ให้แนบ node text ของ target ด้วย (ลดจำนวน round-trip)
+
+2. **citation-grounding Hook (Layer 3)**
+   - บังคับ: ทุก section ที่ปรากฏในคำตอบต้อง map กับ retrieved text ในรอบเดียวกัน
+   - ตามหลัก PyClaw #1 ("anything that must happen every time = Hook, not prompt")
+   - ต้องมาหลัง tool พร้อมแล้ว มิฉะนั้น hook จะบล็อกคำตอบที่ ground ไม่ได้เพราะไม่มี tool ให้ใช้
+
+3. **แก้ prompt (SKILL.md) — secondary**
+   - แก้ wording item 5 ("ใช้ relation ที่เจอ" → ต้อง retrieve ก่อน cite) ให้สอดคล้องกับ item 7
+   - เพิ่ม gate ทั่วไป: "edge = pointer ไม่ใช่หลักฐาน — ต้องเปิดอ่าน node ก่อนอ้าง"
+
+---
+
+## หมายเหตุการใช้เป็น regression baseline
+- ตารางผลด้านบนคือ **baseline ก่อนแก้** — รันซ้ำชุดเดิมหลังแต่ละการแก้ (เพิ่ม tool / ผูก hook / แก้ prompt)
+- เป้าหมายหลัง improve: **GROUND_OK = ✅ ทุกข้อ** (วัด consistency ≥ 5 รอบต่อโมเดล)
+- ablation 2 arm เพื่อแยก H1 vs H3: (A) แก้ prompt อย่างเดียว, (B) แก้ prompt + เพิ่ม tool — เทียบ RETRIEVE_OK
