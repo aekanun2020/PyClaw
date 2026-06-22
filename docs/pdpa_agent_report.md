@@ -63,9 +63,11 @@
 
 ---
 
-## 🟢 อัปเดต 21 มิ.ย. 2569 — ผลหลังเพิ่ม `get_section_text` (Arm B: prompt เดิม + tool ใหม่)
+## 🟢 อัปเดต 21 มิ.ย. 2569 — ผลหลังเพิ่ม `get_section_text` (Arm B: prompt เดิม + tool ใหม่ · Sonnet 1 รอบ)
 
 หลัง implement `get_section_text(section_id)` เป็น MCP Tool ตัวที่ 5 และ rebuild container บนเครื่อง user แล้ว (verified live: `tools/list` แสดง 5 tools, curl test `"27"`→sec_27 และ `sec_999`→`found:false` ผ่านทั้งคู่) — รัน **Q-CCTV-2 ซ้ำ 1 รอบบน `anthropic/claude-sonnet-4.6`** โดย **ยังไม่แก้ TOOLS.md / SKILL.md** (agent ยังไม่ "รู้จัก" tool ใหม่อย่างเป็นทางการ)
+
+> **หมายเหตุขอบเขต:** รอบเดียวนี้ (R1) คือชุด **Sonnet** เก็บเป็นจุดอ้างอิงเริ่มต้น ส่วนชุดวัดเสถียรภาพ 5 รอบเต็มอยู่ในหัวข้อถัดไป (**Arm B — Qwen3.6**)
 
 ### ผลพลิก: Q-CCTV-2 เปลี่ยนจาก ❌ → ✅ ทุกตัวชี้วัด grounding
 
@@ -94,6 +96,52 @@
 - รันเพียง **1 รอบ บน Sonnet เท่านั้น** — spec กำหนด **≥ 5 รอบต่อโมเดล (Sonnet + Qwen)** เพื่อยืนยัน consistency ก่อนสรุปเป็น regression baseline ทางการ
 - Step 2 (แก้ SKILL.md + TOOLS.md ผูก tool อย่างเป็นทางการ) ยังแนะนำให้ทำต่อ — เพื่อ (ก) documentation, (ข) เสถียรภาพแบบ deterministic ไม่พึ่ง docstring อย่างเดียว
 - Step 3 (citation-grounding Hook) ยังจำเป็นตามหลัก "must-happen-every-time = Hook" — docstring แรงพอใน 1 รอบ แต่ไม่การันตีทุกรอบ/ทุกโมเดล
+
+---
+
+## 🔬 อัปเดต 22 มิ.ย. 2569 — Arm B · Qwen3.6 (5 รอบ) — ทดสอบเสถียรภาพของกลไก grounding
+
+รัน **Q-CCTV-2 ซ้ำ 5 รอบ (R2–R6) บนโมเดลเดียวกัน `Qwen3.6`** — คำถามเหมือนทุกตัวอักษร, tool พร้อม (get_section_text ติดตั้งแล้ว), และ **ยังไม่แก้ TOOLS.md / SKILL.md** (agent รู้จัก tool จาก docstring ในตัว tool เท่านั้น: `★ ใช้ tool นี้ทุกครั้งก่อนอ้างมาตรา`) — เพื่อวัดว่ากลไก grounding ที่พึ่ง docstring (soft prompt) อย่างเดียว **เสถียรทุกรอบหรือไม่**
+
+### ตารางผล 5 รอบ (Qwen3.6)
+
+ติดตามสถานะการเรียก `get_section_text` ของมาตราเป้าหมาย (ม.24 / 27 / 37 / 39) และ smoking-gun fact ม.39 ข้อ (๖) "การใช้หรือเปิดเผยตามมาตรา ๒๗ วรรคสาม" (ROPA)
+
+| Round | get_section_text เรียกให้ | count | sec_39? | GROUND_OK | จุดที่พลาด (memory-fill) |
+|:---:|---|:---:|:---:|:---:|---|
+| R2 | 27 only | 1× | ❌ | ❌ | ม.39 + เกือบทั้งหมดจากความจำ |
+| R3 | 37 only | 1× | ❌ | ❌ | ม.27 + 39 จากความจำ |
+| R4 | 27, 24, 23, 39 | 4× | ✅ | ❌ | ม.37(4) "72 ชม." + penalty ม.82 จากความจำ |
+| R5 | 24, 27, 23, 39, 37, 22, 32 | 7× | ✅ | ✅ | — |
+| R6 | 39, 23, 37, 32, 30 | 5× | ✅ | ✅ | — |
+
+### ตัวเลขเสถียรภาพ (n = 5, Qwen3.6, input/โมเดล/tool เหมือนกันทุกรอบ)
+
+| ตัวชี้วัด | ค่า | หมายเหตุ |
+|---|:---:|---|
+| **GROUND_OK** | **2/5 (40%)** | ผ่านเต็มเฉพาะ R5, R6 |
+| sec_39 retrieved | 3/5 (60%) | ❌ ใน R2, R3 → quote ROPA จากความจำ |
+| get_section_text เรียก ≥1× | 5/5 (100%) | **TRACE ไม่เคยล้มเหลว** — agent เรียก tool ทุกรอบ |
+| จำนวนครั้งที่เรียก | 1–7× | แกว่งหนักสำหรับ input เดียวกัน |
+| GATE ม.21 | ผ่าน 5/5 | ไม่เคยอ้าง ม.21 เป็นฐาน; R4 ใช้เป็น purpose-limitation ถูกต้อง |
+
+### ข้อสรุป: ปัญหาคือ **compliance-instability** — ไม่ใช่ "โมเดลทำไม่ได้"
+
+1. **โมเดลทำได้จริง (capability ✅):** R5 และ R6 ทำ GROUND_OK ครบถ้วนด้วย tool ที่มีอยู่ — ยืนยันว่า H3 (missing-tool) ถูกแก้แล้ว และไม่ใช่ "โมเดลทำไม่ได้"
+2. **แต่ไม่สม่ำเสมอ (consistency ❌):** คำถาม/โมเดล/tool เดียวกัน แต่ GROUND_OK ได้แค่ 2/5 → โมเดล "รู้ว่าควรทำ + ทำได้" แต่ "เลือกทำ" ไม่สม่ำเสมอ เพราะ docstring เป็นเพียง soft prompt = **compliance-instability**
+3. **รูปแบบการพลาดต่างกันทุกรอบ (stochastic):** R2 พลาด ม.39, R3 พลาด ม.27+39, R4 พลาด quote 72 ชม. — ไม่ใช่ bug เชิงระบบ (systematic) แต่เป็นความไม่แน่นอนของการปฏิบัติตามคำสั่ง
+
+### นัยเชิงสถาปัตยกรรม: ต้องมี deterministic citation-grounding **Hook**
+
+ตามหลัก AGENT_MEMORY constitution ("สิ่งที่ต้องเกิดทุกครั้ง = Hook ไม่ใช่ prompt") — วินัย grounding ต้องเกิดทุกรอบ → soft prompt (docstring) ไม่พอ → ต้องมี **Hook แบบ deterministic** บังคับ invariant:
+
+> ทุกมาตราใน `cited_sections` ต้องผ่าน `get_section_text` มาก่อนตอบ — มิฉะนั้น **block/retry**
+
+ข้อมูล 5 รอบนี้สนับสนุน fix priority ลำดับเดิม: (1) get_section_text ✅ เสร็จ → (2) **citation-grounding Hook** (ตอนนี้มีข้อมูลสนับสนุนแล้ว) → (3) แก้ SKILL.md + TOOLS.md (ระบุ tool + gate "edge = pointer ไม่ใช่หลักฐาน")
+
+### ⚠️ ขอบเขตที่ยังค้าง
+- ชุด **Sonnet** ยังมีแค่ 1 รอบ (R1) — spec กำหนด ≥5 รอบต่อโมเดล จึงยังต้องเก็บ Sonnet เพิ่มให้ครบก่อนเปรียบข้ามโมเดล
+- ผลนี้วัด **ก่อนแก้ SKILL.md/TOOLS.md และก่อนผูก Hook** — เป็น baseline ของ "docstring-only" ที่ใช้เทียบหลังผูก Hook ได้
 
 ---
 
@@ -171,6 +219,12 @@
 ---
 
 ## หมายเหตุการใช้เป็น regression baseline
-- ตารางผลด้านบนคือ **baseline ก่อนแก้** — รันซ้ำชุดเดิมหลังแต่ละการแก้ (เพิ่ม tool / ผูก hook / แก้ prompt)
+- ตารางผล CCTV Benchmark ด้านบนคือ **baseline ก่อนแก้** — รันซ้ำชุดเดิมหลังแต่ละการแก้ (เพิ่ม tool / ผูก hook / แก้ prompt)
 - เป้าหมายหลัง improve: **GROUND_OK = ✅ ทุกข้อ** (วัด consistency ≥ 5 รอบต่อโมเดล)
 - ablation 2 arm เพื่อแยก H1 vs H3: (A) แก้ prompt อย่างเดียว, (B) แก้ prompt + เพิ่ม tool — เทียบ RETRIEVE_OK
+
+### สถานะการเก็บรอบ (ณ 22 มิ.ย. 2569)
+| โมเดล | รอบที่เก็บได้ | สถานะ (spec ≥ 5 รอบ/โมเดล) | GROUND_OK |
+|---|:---:|:---:|:---:|
+| Sonnet | R1 (1 รอบ) | ⚠️ ยังไม่ครบ — ต้องเก็บเพิ่ม ≥4 รอบ | 1/1 (R1 ผ่าน) |
+| Qwen3.6 | R2–R6 (5 รอบ) | ✅ ครบตาม spec | **2/5 (40%)** |
