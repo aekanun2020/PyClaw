@@ -26,8 +26,6 @@ Hook บังคับได้เฉพาะ **พฤติกรรมที
 
 ## เส้นทางการทำงานของ Hook: yaml → Engine → Runner → Hook
 
-![Hook flow diagram](report_assets/hook_flow_diagram.png)
-
 ```
 [1] default_hooks.yaml            [2] HookEngine               [3] PythonRunner
   (config: มี hook อะไร)            (ผู้จัดการ)                  (พนักงาน — รัน Hook)
