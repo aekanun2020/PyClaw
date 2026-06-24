@@ -37,14 +37,18 @@ hooks:
   # answer that cites a section never retrieved this turn (fail-closed).
   # They share per-turn state via the loop's turn_state dict ([A2] in
   # core/loop.py), so registration order does not matter — only that both fire.
+  # Targets resolve to the PDPA *wrapper* (pyclaw_hooks_pdpa.grounding), which
+  # injects PDPA patterns/tools into the GENERIC core (pyclaw_hooks.grounding).
+  # PyClaw core carries no Thai-law vocabulary; another domain ships its own
+  # wrapper the same way.
   - name: record-grounding
     event: PostToolUse
     runner: python
-    target: pyclaw_hooks.grounding:record_grounding
+    target: pyclaw_hooks_pdpa.grounding:record_grounding
     priority: 50
 
   - name: enforce-grounding
     event: PreResponse
     runner: python
-    target: pyclaw_hooks.grounding:enforce_grounding
+    target: pyclaw_hooks_pdpa.grounding:enforce_grounding
     priority: 50

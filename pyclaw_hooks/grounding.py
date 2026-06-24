@@ -1,87 +1,67 @@
-"""Citation-grounding hook: every cited PDPA section must be retrieved first.
+"""Generic citation-grounding hooks (domain-agnostic core).
 
-This is the Layer-3 enforcement of the grounding invariant that the 5-round
-Qwen3.6 benchmark proved a docstring (soft prompt) cannot guarantee:
+The grounding *mechanism* is universal: an agent must not cite an identifier it
+never actually retrieved this turn. The *vocabulary* of what an identifier looks
+like ("ม.39", "§ 230", "ICD-10 J45", a doc id ...) and which tool counts as a
+genuine retrieval is DOMAIN-specific and therefore injected, never hard-coded.
 
-    GROUND_OK was only 2/5 for identical input/model/tool — the model is
-    *capable* (R5, R6 passed) but *inconsistent* (compliance-instability).
-    A "must-happen-every-time" rule belongs in a Hook, not a prompt (#1).
+So this module exposes two factories — `make_record_grounding` and
+`make_enforce_grounding` — that bake in a domain's:
+
+  * `patterns`        : regexes whose group(1) is the raw id token
+  * `canon`           : token -> canonical id (e.g. "39" -> "sec_39")
+  * `retrieval_tools` : tool names that count as a real retrieval
+  * `parse_result`    : tool-result -> (found, canonical_id)   [handles MCP]
+
+PyClaw core ships NO domain pattern. A domain plugin (e.g. pdpa-grounding)
+builds its own hook callables from these factories and points its plugin.yaml
+`target:` at them. An agent that loads no grounding plugin gets no grounding
+behaviour — nothing here fires for it.
 
 Mechanism — two lifecycle events working together:
 
-  1. PostToolUse  -> whenever `get_section_text(section_id=...)` returns
-     found=true, record that section id as GROUNDED for this turn.
-     (state lives in `payload.extra["grounded_sections"]`, a per-turn set
-     the core loop threads through; we fall back to a module set keyed by
-     turn id if the loop does not provide one.)
+  1. PostToolUse  -> when a retrieval tool reports found=true, record the
+     canonical id as GROUNDED for this turn (state in payload.extra, the
+     per-turn dict the loop threads through; module fallback keyed by turn id).
 
-  2. PreResponse  -> parse the section ids the draft answer CITES, diff them
-     against the GROUNDED set. If any cited section was never retrieved,
-     BLOCK the response (engine is fail-closed) with a machine-readable list
-     so the loop can retry: call get_section_text for the missing ids, then
-     re-attempt the response.
+  2. PreResponse  -> extract the ids the draft CITES, diff against GROUNDED.
+     If any cited id was never retrieved, BLOCK (engine is fail-closed) with a
+     machine-readable list so the loop can retrieve-then-retry.
 
-The invariant:
-
-    every section in cited_sections  ⊆  grounded_sections   (else BLOCK)
-
-Deterministic, regex-based, no LLM in the loop (principle #1: Prompt != Policy).
+Invariant:  cited ⊆ grounded   (else BLOCK).  No LLM in the loop (#1: Prompt != Policy).
 """
 
 from __future__ import annotations
 
+import json
 import re
-from typing import Any
+from typing import Any, Callable, Iterable
 
 from pyclaw.hooks.events import HookAction, HookPayload, HookResult
 
-# ---- section-id normalisation -------------------------------------------------
+# Types injected by a domain plugin.
+Pattern = re.Pattern[str]
+CanonFn = Callable[[str], str]
+ResultParser = Callable[[Any], "tuple[bool, str | None]"]
 
-# Accept the forms the agent actually emits: "sec_39", "มาตรา 39", "ม.39",
-# "section 39", bare "39" — all normalise to the canonical id "sec_39".
-_SEC_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bsec[_\s]?(\d{1,3})\b", re.IGNORECASE),
-    re.compile(r"\bsection[_\s]?(\d{1,3})\b", re.IGNORECASE),
-    re.compile(r"มาตรา\s*(\d{1,3})"),
-    re.compile(r"ม\.?\s*(\d{1,3})"),
-)
+# ---- per-turn grounded-set storage (domain-agnostic) -------------------------
 
-
-def _canon(num: str) -> str:
-    return f"sec_{int(num)}"
-
-
-def _extract_section_ids(text: str) -> set[str]:
-    """All section ids mentioned anywhere in `text`, canonicalised."""
-    found: set[str] = set()
-    for pat in _SEC_PATTERNS:
-        for m in pat.finditer(text or ""):
-            found.add(_canon(m.group(1)))
-    return found
-
-
-# ---- per-turn grounded-set storage -------------------------------------------
-
-# Preferred: the core loop hands us a mutable set on payload.extra so state is
-# scoped to the turn. If absent, we keep a fallback keyed by turn id in extra.
 _GROUNDED_KEY = "grounded_sections"
 _TURN_KEY = "turn_id"
 _fallback_store: dict[str, set[str]] = {}
 
 
 def _grounded_set(payload: HookPayload) -> set[str]:
-    """Return the per-turn grounded-section set, creating it in place.
+    """Return the per-turn grounded set, creating it in place.
 
-    Preferred path: the core loop threads a mutable `turn_state` dict in as
-    `payload.extra` ([A2] in core/loop.py). We lazily seed our set INTO that
-    dict the first time we see it, so the same set object is shared across the
-    PostToolUse and PreResponse payloads of one run (they carry the same dict
-    by reference). This is what makes the invariant turn-scoped and correct.
+    Preferred path: the loop threads a mutable `turn_state` dict as
+    payload.extra ([A2] in core/loop.py); we seed our set INTO it so the same
+    object is shared by-reference across the PostToolUse and PreResponse
+    payloads of one run — that is what makes the invariant turn-scoped.
 
-    Fallback (only when extra is missing/immutable, e.g. a hook invoked outside
-    the loop in a unit test): a module store keyed by turn id. This path is
-    NOT turn-isolated across concurrent runs and must not be relied on in
-    production — it exists purely so the hook degrades instead of crashing.
+    Fallback (extra missing/immutable, e.g. a unit test calling the hook outside
+    the loop): a module store keyed by turn id. NOT turn-isolated across
+    concurrent runs; exists only so the hook degrades instead of crashing.
     """
     extra = payload.extra
     if isinstance(extra, dict):
@@ -89,68 +69,158 @@ def _grounded_set(payload: HookPayload) -> set[str]:
         if isinstance(existing, set):
             return existing
         fresh: set[str] = set()
-        extra[_GROUNDED_KEY] = fresh  # seed into the shared turn_state dict
+        extra[_GROUNDED_KEY] = fresh
         return fresh
     turn = str((extra or {}).get(_TURN_KEY, "default"))
     return _fallback_store.setdefault(turn, set())
 
 
-# ---- the two hooks -----------------------------------------------------------
+# ---- generic result parsing (MCP-aware) --------------------------------------
 
-def record_grounding(payload: HookPayload) -> HookResult:
-    """PostToolUse: mark a section GROUNDED after a successful get_section_text.
+def _coerce_payload(obj: Any) -> Any:
+    """Best-effort unwrap of an MCP tool result into a plain dict.
 
-    Only a genuine retrieval counts: the tool must be get_section_text and its
-    result must report found=true. Anything else is a no-op ALLOW.
+    Real MCP results arrive as an envelope, NOT a flat dict:
+
+        {"content": [{"type": "text", "text": "<json string>"}],
+         "structuredContent": {"result": "<json string>"}, "isError": false}
+
+    The useful fields (found, section_id, number) live INSIDE that json string,
+    so a naive `result.get("found")` always saw None — every retrieval silently
+    failed to ground. This unwraps the common shapes:
+
+      * plain dict that already has the fields            -> as-is
+      * {"structuredContent": {"result": "<json>"}}       -> parsed inner json
+      * {"content": [{"text": "<json>"}, ...]}            -> parsed inner json
+      * a bare json string                                -> parsed
     """
-    if (payload.tool or "") not in {"get_section_text", "pdpa_get_section_text"}:
-        return HookResult(action=HookAction.ALLOW)
+    if isinstance(obj, str):
+        try:
+            return json.loads(obj)
+        except (ValueError, TypeError):
+            return {}
+    if not isinstance(obj, dict):
+        return {}
 
-    result: Any = payload.result
-    # The MCP result may arrive as a dict or a JSON string; read defensively.
-    found = False
-    section_id: str | None = None
-    if isinstance(result, dict):
-        found = bool(result.get("found"))
-        section_id = result.get("section_id") or (
-            _canon(str(result["number"])) if result.get("number") else None
-        )
-    if not (found and section_id):
-        # Tool errored / section not found -> nothing is grounded.
-        return HookResult(action=HookAction.ALLOW)
+    # Already-flat result (e.g. an in-process tool or a test fake).
+    if "found" in obj or "section_id" in obj or "number" in obj:
+        return obj
 
-    _grounded_set(payload).add(section_id)
-    return HookResult(
-        action=HookAction.ALLOW,
-        message=f"grounded {section_id}",
-        source_hook="record_grounding",
-    )
+    # MCP envelope: structuredContent.result first (most reliable), then content[].text.
+    sc = obj.get("structuredContent")
+    if isinstance(sc, dict) and "result" in sc:
+        inner = _coerce_payload(sc["result"])
+        if inner:
+            return inner
+
+    content = obj.get("content")
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                inner = _coerce_payload(part["text"])
+                if inner:
+                    return inner
+    return obj
 
 
-def enforce_grounding(payload: HookPayload) -> HookResult:
-    """PreResponse: BLOCK if the draft cites any section it never retrieved.
+def default_result_parser(canon: CanonFn) -> ResultParser:
+    """A reusable parser: unwrap (MCP-aware), require found=true, read the id.
 
-    cited = section ids in the draft answer (payload.arguments["text"]).
-    grounded = ids recorded by record_grounding this turn.
-    BLOCK when cited - grounded is non-empty (fail-closed, principle #1).
+    A domain may pass its own parser to a factory if its tools differ, but this
+    covers the common `{found, section_id|number}` contract used by the PDPA
+    tools and most JSON tools behind MCP.
     """
-    draft = (payload.arguments or {}).get("text", "")
-    cited = _extract_section_ids(draft)
-    grounded = _grounded_set(payload)
+    def parse(result: Any) -> tuple[bool, str | None]:
+        data = _coerce_payload(result)
+        if not isinstance(data, dict):
+            return False, None
+        found = bool(data.get("found"))
+        sid = data.get("section_id")
+        if not sid and data.get("number") is not None:
+            sid = canon(str(data["number"]))
+        return found, (sid or None)
 
-    missing = sorted(
-        cited - grounded,
-        key=lambda s: int(s.split("_")[1]),
-    )
-    if missing:
+    return parse
+
+
+# ---- factories ---------------------------------------------------------------
+
+def make_extract_ids(patterns: Iterable[Pattern], canon: CanonFn) -> Callable[[str], set[str]]:
+    """Build a citation extractor for one domain's patterns."""
+    pats = tuple(patterns)
+
+    def extract(text: str) -> set[str]:
+        found: set[str] = set()
+        for pat in pats:
+            for m in pat.finditer(text or ""):
+                found.add(canon(m.group(1)))
+        return found
+
+    return extract
+
+
+def make_record_grounding(
+    *,
+    retrieval_tools: Iterable[str],
+    canon: CanonFn,
+    parse_result: ResultParser | None = None,
+    source_hook: str = "record_grounding",
+) -> Callable[[HookPayload], HookResult]:
+    """Build a PostToolUse hook that grounds an id after a successful retrieval."""
+    tools = frozenset(retrieval_tools)
+    parser = parse_result or default_result_parser(canon)
+
+    def record_grounding(payload: HookPayload) -> HookResult:
+        if (payload.tool or "") not in tools:
+            return HookResult(action=HookAction.ALLOW)
+        found, section_id = parser(payload.result)
+        if not (found and section_id):
+            return HookResult(action=HookAction.ALLOW)
+        _grounded_set(payload).add(section_id)
         return HookResult(
-            action=HookAction.BLOCK,
-            message=(
-                "citation-grounding violation: the answer cites "
-                f"{missing} but get_section_text was never called for them. "
-                "Retrieve each missing section, then re-answer. "
-                f"(grounded this turn: {sorted(grounded) or 'none'})"
-            ),
-            source_hook="enforce_grounding",
+            action=HookAction.ALLOW,
+            message=f"grounded {section_id}",
+            source_hook=source_hook,
         )
-    return HookResult(action=HookAction.ALLOW, source_hook="enforce_grounding")
+
+    return record_grounding
+
+
+def make_enforce_grounding(
+    *,
+    patterns: Iterable[Pattern],
+    canon: CanonFn,
+    text_key: str = "text",
+    source_hook: str = "enforce_grounding",
+) -> Callable[[HookPayload], HookResult]:
+    """Build a PreResponse hook that BLOCKs any cited-but-ungrounded id.
+
+    Scoping note: if NOTHING was grounded this turn (the agent never called a
+    retrieval tool of this domain) AND the draft cites nothing matching this
+    domain's patterns, the hook is a pure no-op ALLOW — so loading the PDPA
+    grounding plugin cannot accidentally block an unrelated agent's answer.
+    """
+    extract = make_extract_ids(patterns, canon)
+
+    def enforce_grounding(payload: HookPayload) -> HookResult:
+        draft = (payload.arguments or {}).get(text_key, "")
+        cited = extract(draft)
+        if not cited:
+            # Draft mentions no id in this domain's vocabulary -> not our concern.
+            return HookResult(action=HookAction.ALLOW, source_hook=source_hook)
+        grounded = _grounded_set(payload)
+        missing = sorted(cited - grounded, key=lambda s: int(s.split("_")[1]))
+        if missing:
+            return HookResult(
+                action=HookAction.BLOCK,
+                message=(
+                    "citation-grounding violation: the answer cites "
+                    f"{missing} but the retrieval tool was never called for them. "
+                    "Retrieve each missing item, then re-answer. "
+                    f"(grounded this turn: {sorted(grounded) or 'none'})"
+                ),
+                source_hook=source_hook,
+            )
+        return HookResult(action=HookAction.ALLOW, source_hook=source_hook)
+
+    return enforce_grounding

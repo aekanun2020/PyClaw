@@ -67,8 +67,8 @@ def test_plugin_path_registers_grounding_hooks() -> None:
 
     assert by_name["record-grounding"].event == HookEvent.POST_TOOL_USE
     assert by_name["enforce-grounding"].event == HookEvent.PRE_RESPONSE
-    assert by_name["record-grounding"].target == "pyclaw_hooks.grounding:record_grounding"
-    assert by_name["enforce-grounding"].target == "pyclaw_hooks.grounding:enforce_grounding"
+    assert by_name["record-grounding"].target == "pyclaw_hooks_pdpa.grounding:record_grounding"
+    assert by_name["enforce-grounding"].target == "pyclaw_hooks_pdpa.grounding:enforce_grounding"
 
     # And the engine must actually surface them per-event (not just hold specs).
     assert any(s.name == "enforce-grounding"
