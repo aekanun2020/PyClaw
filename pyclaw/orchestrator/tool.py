@@ -73,12 +73,35 @@ def _route_params(agent_names: list[str]) -> dict[str, Any]:
     }
 
 
+# Mechanism-level guidance the orchestrator LLM sees IN PLACE OF a blocked
+# agent answer. A blocked summary (the RESPONSE_BLOCKED sentinel) carries no
+# usable content, and surfacing it verbatim invites the model to paraphrase the
+# same question and retry. Replacing it with an explicit "don't retry reworded;
+# change strategy" instruction turns the block into a state transition. Pure
+# routing guidance — no domain vocabulary.
+_BLOCKED_GUIDANCE = (
+    "[blocked] The agent's answer was rejected because it cited information not "
+    "actually retrieved (a grounding violation). This is a failed attempt, not "
+    "an answer. Do NOT re-ask the same question reworded — it will fail the same "
+    "way. Instead: have the agent retrieve the source content before citing it, "
+    "decompose into narrower questions, route to a different agent, or report "
+    "that the request cannot be answered from grounded sources."
+)
+
+
 def _result_dict(r: RouteResult) -> dict[str, Any]:
     return {
         "agent": r.agent,
         "message": r.message,
         "ok": r.ok,
-        "summary": r.summary,
+        # Mechanism-only flag: True when the agent's answer was blocked OR the
+        # circuit breaker refused to retry. Lets the orchestrator distinguish a
+        # grounding failure from an ordinary empty/short answer.
+        "blocked": r.blocked,
+        # On a block, the raw summary is the opaque sentinel with no content;
+        # show the LLM actionable routing guidance instead so it changes
+        # strategy rather than retrying reworded.
+        "summary": _BLOCKED_GUIDANCE if r.blocked else r.summary,
         "error": r.error,
         # Generic grounded-id set the routed agent recorded, surfaced in the
         # tool result so the orchestrator's PostToolUse hook can merge it into

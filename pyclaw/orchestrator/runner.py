@@ -35,9 +35,11 @@ spawn further agents (the runner strips spawn tools + guards is_nested).
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+from pyclaw.core.loop import RESPONSE_BLOCKED
 from pyclaw.hooks import HookEngine
 from pyclaw.orchestrator.registry import AgentRegistry, AgentSpec
 from pyclaw.subagents.runner import (
@@ -57,6 +59,13 @@ class RouteResult:
     summary: str
     ok: bool = True
     error: str | None = None
+    # Mechanism-only: True when the routed agent's loop BLOCKed its answer
+    # (summary == core RESPONSE_BLOCKED sentinel). A blocked route is NOT
+    # partial content to paraphrase around — it is a failed attempt. We surface
+    # this so (a) ok is downgraded to False (LLMs treat ok:false tool results as
+    # "change strategy", not "retry reworded"), and (b) the circuit breaker can
+    # count consecutive blocked routes per agent. Carries no domain meaning.
+    blocked: bool = False
     # The generic grounded-id set the routed agent's isolated loop recorded,
     # bubbled up from SubagentResult.grounded. The orchestrator unions these
     # across all routes and enforces its COMBINED final answer against them
@@ -85,6 +94,18 @@ class OrchestratorRunner:
     run_isolated: "object" = None       # injected in tests; None -> real loop
     available_tools: tuple[str, ...] = ()
     max_workers: int = 4
+    # Circuit breaker (mechanism-only). Counts CONSECUTIVE blocked routes per
+    # agent within this runner's lifetime (one runner == one orchestrator
+    # user-turn). After `block_breaker_limit` consecutive blocks to the same
+    # agent, the next route to that agent is refused deterministically instead
+    # of spawning again — this is the hard ceiling that does not depend on the
+    # LLM following the blocked-signal instruction. The counter RESETS to zero
+    # on any non-blocked route to that agent (so legitimately different
+    # sub-questions that happen to fail are not conflated with a retry storm).
+    # Keyed on opaque agent name + a boolean flag — no domain vocabulary.
+    block_breaker_limit: int = 2
+    _block_streak: dict[str, int] = field(default_factory=dict)
+    _breaker_lock: object = field(default_factory=threading.Lock)
 
     def _runner_for(self, agent: AgentSpec) -> SubagentRunner:
         """Build a SubagentRunner restricted to exactly `agent`'s tool group.
@@ -128,14 +149,55 @@ class OrchestratorRunner:
                 agent=agent_name, message=message, summary="", ok=False,
                 error=f"unknown agent {agent_name!r}; known: {self.registry.names()}",
             )
+
+        # Circuit breaker (mechanism): if this agent has already returned
+        # `block_breaker_limit` CONSECUTIVE blocked answers, stop spawning. The
+        # orchestrator gets a deterministic ok:false error and must change
+        # strategy (decompose, route elsewhere, or report inability) instead of
+        # burning another full agent run on the same dead end.
+        with self._breaker_lock:
+            tripped = self._block_streak.get(agent_name, 0) >= self.block_breaker_limit
+        if tripped:
+            return RouteResult(
+                agent=agent_name, message=message, summary="", ok=False,
+                blocked=True,
+                error=(
+                    f"[blocked-limit] {agent_name!r} returned "
+                    f"{self.block_breaker_limit} consecutive blocked answers; "
+                    "not retrying. The agent could not ground this request "
+                    "after retrieval — do NOT re-ask it reworded. Decompose the "
+                    "question differently, route to another agent, or report "
+                    "that it cannot be answered from grounded sources."
+                ),
+            )
+
         runner = self._runner_for(agent)
         result = runner.spawn(
             self._spec_for(message, agent),
             on_tool=_label_on_tool(on_tool, _agent_label(agent_name)),
         )
+        blocked = result.ok and result.summary == RESPONSE_BLOCKED
+
+        # Update the per-agent consecutive-block streak: increment on a blocked
+        # answer, reset to zero on any non-blocked outcome (progress).
+        with self._breaker_lock:
+            if blocked:
+                self._block_streak[agent_name] = (
+                    self._block_streak.get(agent_name, 0) + 1
+                )
+            else:
+                self._block_streak[agent_name] = 0
+
         return RouteResult(
             agent=agent_name, message=message,
-            summary=result.summary, ok=result.ok, error=result.error,
+            summary=result.summary,
+            # A blocked answer is a FAILED attempt, not partial content: report
+            # ok=False so the orchestrator LLM treats it as "change strategy"
+            # rather than "retry reworded". Non-blocked outcomes keep the loop's
+            # own ok flag unchanged.
+            ok=(result.ok and not blocked),
+            error=result.error,
+            blocked=blocked,
             grounded=set(result.grounded),
         )
 

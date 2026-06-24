@@ -41,6 +41,14 @@ from pyclaw.runtime.hitl import ApprovalDecision, ApprovalRequest, HITLGate
 from pyclaw.skills.loader import SkillLoader
 
 
+# Mechanism-only sentinel. When a PreResponse hook BLOCKs a turn, the loop
+# replaces the model's answer with this exact string. It is exported so other
+# mechanism layers (e.g. the orchestrator) can DETECT a blocked outcome by
+# identity instead of duplicating a magic string. Carries NO domain meaning —
+# any domain's enforce hook that BLOCKs surfaces the same sentinel.
+RESPONSE_BLOCKED = "[response blocked by policy]"
+
+
 class ToolBlocked(Exception):
     """Raised internally when policy/hook/HITL blocks a tool. Carries a reason."""
 
@@ -276,7 +284,7 @@ class AgentLoop:
             )
         )
         if res.action is HookAction.BLOCK:
-            return "[response blocked by policy]"
+            return RESPONSE_BLOCKED
         if res.action is HookAction.MODIFY and res.modified_payload is not None:
             return str(res.modified_payload.arguments.get("text", text))
         return text
