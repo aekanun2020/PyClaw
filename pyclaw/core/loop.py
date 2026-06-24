@@ -57,6 +57,19 @@ RESPONSE_BLOCKED = "[response blocked by policy]"
 # attaches no domain meaning to its contents.
 BLOCK_DETAIL_KEY = "block_detail"
 
+# Mechanism-only: how many times one run may be BLOCKed by a PreResponse hook and
+# given a feedback-retry before the loop gives up and returns the opaque sentinel.
+# When a draft is blocked (e.g. it cited an id the agent never retrieved), the
+# loop feeds the hook's raw `message` back into the conversation and lets the
+# model try again WITHIN THE SAME RUN — so the agent can retrieve the missing
+# source (or drop the citation) instead of the whole run failing. The loop never
+# inspects the message contents (it is an opaque string written by whatever
+# domain's hook fired), so this stays domain-agnostic: any enforce hook of any
+# domain gets the same self-correction loop for free. The cap prevents an
+# infinite block<->retry cycle if the model keeps citing ungrounded ids; once it
+# is hit the run returns RESPONSE_BLOCKED exactly as before this change.
+BLOCK_RETRY_LIMIT = 2
+
 
 class ToolBlocked(Exception):
     """Raised internally when policy/hook/HITL blocks a tool. Carries a reason."""
@@ -141,6 +154,12 @@ class AgentLoop:
 
         tool_specs = self.tools.llm_specs()
 
+        # Mechanism-only: how many times a PreResponse hook has BLOCKed a draft
+        # this run and we have fed the reason back for another attempt. Bounded
+        # by BLOCK_RETRY_LIMIT so a model that keeps citing ungrounded ids cannot
+        # loop forever; the run then returns the opaque sentinel as before.
+        block_retries = 0
+
         for _round in range(self.max_tool_rounds):
             if self.context.maybe_compact():
                 self.hooks.fire(HookPayload(event=HookEvent.POST_COMPACTION, user=user))
@@ -161,7 +180,27 @@ class AgentLoop:
                 # the *finalized* text (post PreResponse hook) so the persisted
                 # history matches exactly what the user saw. (#bug: plain-text
                 # answers were previously never appended.)
-                final = self._finalize(response.text, user, turn_state)
+                final, block_msg = self._finalize(response.text, user, turn_state)
+                if block_msg is not None and block_retries < BLOCK_RETRY_LIMIT:
+                    # Feedback-retry (mechanism-only): the PreResponse hook
+                    # rejected this draft (e.g. it cited an id never retrieved).
+                    # Instead of failing the whole run, append the assistant's
+                    # rejected draft + the hook's raw reason back into the
+                    # conversation and loop again, so the model can self-correct
+                    # WITHIN THIS RUN (retrieve the missing source, or drop the
+                    # citation). `block_msg` is an opaque string authored by the
+                    # domain's hook — the loop never parses it, keeping core
+                    # domain-agnostic. The rejected draft is persisted so the
+                    # model sees exactly what it said and what was wrong with it.
+                    block_retries += 1
+                    self.context.append(
+                        Message(role=Role.ASSISTANT, content=response.text)
+                    )
+                    self.context.append(Message(role=Role.USER, content=block_msg))
+                    # Clear the stashed detail so a subsequent successful answer
+                    # is not mistaken for a blocked one by an outer layer.
+                    turn_state.pop(BLOCK_DETAIL_KEY, None)
+                    continue
                 self.context.append(Message(role=Role.ASSISTANT, content=final))
                 return final
 
@@ -190,10 +229,13 @@ class AgentLoop:
                     )
                 )
 
-        # Ran out of rounds without a plain-text answer.
-        return self._finalize(
+        # Ran out of rounds without a plain-text answer. (Includes the case where
+        # the block-retry budget was exhausted and the last draft was still
+        # blocked: _finalize returns the sentinel as `final`, which we return.)
+        final, _block_msg = self._finalize(
             "Reached max_tool_rounds without a final answer.", user, turn_state
         )
+        return final
 
     def _invoke_tool(self, call: ToolCall, user: str, on_tool=None,
                      turn_state: dict[str, object] | None = None) -> object:
@@ -279,12 +321,21 @@ class AgentLoop:
         return result
 
     def _finalize(self, text: str, user: str,
-                  turn_state: dict[str, object] | None = None) -> str:
+                  turn_state: dict[str, object] | None = None,
+                  ) -> tuple[str, str | None]:
         """PreResponse hook — last chance to redact/modify before the user sees it.
 
         `turn_state` ([A2]) is forwarded as the payload's `extra` so a
         PreResponse hook (e.g. enforce_grounding) can read state recorded by
         earlier PostToolUse hooks in the same run.
+
+        Returns `(text, block_message)`:
+          * not blocked -> (finalized_text, None)
+          * blocked     -> (RESPONSE_BLOCKED, hook.message_or_sentinel)
+        The second element lets the caller (`_run`) decide whether to feed the
+        reason back for an in-run retry (BLOCK_RETRY_LIMIT) or surface the
+        sentinel. It is the hook's RAW message — an opaque, domain-authored
+        string the loop never parses — so core stays domain-agnostic.
         """
         res = self.hooks.fire(
             HookPayload(
@@ -299,10 +350,13 @@ class AgentLoop:
             # generic dict. No-op when turn_state isn't a writable dict.
             if isinstance(turn_state, dict) and res.message:
                 turn_state[BLOCK_DETAIL_KEY] = str(res.message)
-            return RESPONSE_BLOCKED
+            # Surface a non-None reason so _run can offer a feedback-retry.
+            # Fall back to the sentinel if the hook gave no message (still a
+            # truthy signal that this draft was blocked).
+            return RESPONSE_BLOCKED, (res.message or RESPONSE_BLOCKED)
         if res.action is HookAction.MODIFY and res.modified_payload is not None:
-            return str(res.modified_payload.arguments.get("text", text))
-        return text
+            return str(res.modified_payload.arguments.get("text", text)), None
+        return text, None
 
     def _build_system(self, user: str) -> str:
         parts = [self.system_prompt]

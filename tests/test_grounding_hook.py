@@ -37,7 +37,12 @@ class FakeLLM:
     _i: int = 0
 
     def complete(self, messages, tools=None, model=None, temperature=0.0):  # noqa: ANN001
-        resp = self.script[self._i]
+        # Clamp at the last scripted response: once the script is exhausted the
+        # fake keeps replaying its final answer. This models a STUBBORN model
+        # for the in-run block-retry path (loop feeds the block reason back and
+        # asks again) — if the model keeps citing the same ungrounded id, the
+        # loop must still terminate at RESPONSE_BLOCKED after BLOCK_RETRY_LIMIT.
+        resp = self.script[min(self._i, len(self.script) - 1)]
         self._i += 1
         return resp
 

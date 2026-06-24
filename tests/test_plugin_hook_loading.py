@@ -39,7 +39,10 @@ class FakeLLM:
     _i: int = 0
 
     def complete(self, messages, tools=None, model=None, temperature=0.0):  # noqa: ANN001
-        resp = self.script[self._i]
+        # Clamp at the last scripted response (see test_grounding_hook.FakeLLM):
+        # models a stubborn model so the in-run block-retry path still
+        # terminates at RESPONSE_BLOCKED after BLOCK_RETRY_LIMIT.
+        resp = self.script[min(self._i, len(self.script) - 1)]
         self._i += 1
         return resp
 
