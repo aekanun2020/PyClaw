@@ -72,6 +72,13 @@ class RouteResult:
     # (closing the orchestrator-level grounding hole). Empty for an agent that
     # loaded no grounding plugin. Mechanism-only: opaque set of strings here.
     grounded: set[str] = field(default_factory=set)
+    # Mechanism-only diagnostic: when this route was blocked, the BLOCKing hook's
+    # raw message (e.g. "cites [...] but never retrieved") bubbled up from
+    # SubagentResult.block_detail, OR the breaker's refusal reason. Surfaced in
+    # the tool result so --trace shows WHY a route failed — without leaking it
+    # into the orchestrator LLM's actionable summary (which stays the generic
+    # "change strategy" guidance). None for a non-blocked route. Opaque string.
+    block_detail: str | None = None
 
 
 def _agent_label(name: str) -> str:
@@ -158,17 +165,20 @@ class OrchestratorRunner:
         with self._breaker_lock:
             tripped = self._block_streak.get(agent_name, 0) >= self.block_breaker_limit
         if tripped:
+            breaker_msg = (
+                f"[blocked-limit] {agent_name!r} returned "
+                f"{self.block_breaker_limit} consecutive blocked answers; "
+                "not retrying. The agent could not ground this request "
+                "after retrieval — do NOT re-ask it reworded. Decompose the "
+                "question differently, route to another agent, or report "
+                "that it cannot be answered from grounded sources."
+            )
             return RouteResult(
                 agent=agent_name, message=message, summary="", ok=False,
-                blocked=True,
-                error=(
-                    f"[blocked-limit] {agent_name!r} returned "
-                    f"{self.block_breaker_limit} consecutive blocked answers; "
-                    "not retrying. The agent could not ground this request "
-                    "after retrieval — do NOT re-ask it reworded. Decompose the "
-                    "question differently, route to another agent, or report "
-                    "that it cannot be answered from grounded sources."
-                ),
+                blocked=True, error=breaker_msg,
+                # The breaker refused before spawning, so there's no per-run
+                # enforce message; the refusal reason IS the diagnostic detail.
+                block_detail=breaker_msg,
             )
 
         runner = self._runner_for(agent)
@@ -199,6 +209,10 @@ class OrchestratorRunner:
             error=result.error,
             blocked=blocked,
             grounded=set(result.grounded),
+            # Surface the BLOCKing hook's diagnostic detail only when this route
+            # was actually blocked; otherwise leave it None (a non-blocked run
+            # carries no block reason). Mechanism-only opaque string.
+            block_detail=(result.block_detail if blocked else None),
         )
 
     def route_parallel(

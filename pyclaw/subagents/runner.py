@@ -105,6 +105,11 @@ class SubagentResult:
     # every routed agent actually retrieved (the subagent already self-enforces
     # its OWN answer inside its own loop).
     grounded: set[str] = field(default_factory=set)
+    # Mechanism-only diagnostic: when this agent's isolated loop BLOCKed its
+    # answer, the BLOCKing hook's raw message (e.g. "cites [...] but never
+    # retrieved") is bubbled here so the orchestrator can surface WHY in --trace.
+    # Empty/None for a non-blocked run. Opaque string — no domain meaning.
+    block_detail: str | None = None
 
 
 @dataclass
@@ -186,7 +191,15 @@ class SubagentRunner:
         #    test runners that don't carry one degrade to an empty set.
         grounded = getattr(runner, "last_grounded", set())
         grounded = set(grounded) if isinstance(grounded, (set, frozenset)) else set()
-        return SubagentResult(spec=spec, summary=summary, ok=True, grounded=grounded)
+        # Bubble the BLOCKing hook's diagnostic detail (set by the loop's
+        # _finalize when it BLOCKed). Mechanism-only opaque string; None when the
+        # run wasn't blocked or the runner doesn't expose it.
+        detail = getattr(runner, "last_block_detail", None)
+        block_detail = str(detail) if isinstance(detail, str) and detail else None
+        return SubagentResult(
+            spec=spec, summary=summary, ok=True,
+            grounded=grounded, block_detail=block_detail,
+        )
 
 
 @dataclass
@@ -309,9 +322,16 @@ def build_isolated_runner(
         state = loop.last_turn_state or {}
         grounded = state.get("grounded_sections")
         _run.last_grounded = set(grounded) if isinstance(grounded, (set, frozenset)) else set()
+        # Read back the BLOCKing hook's diagnostic detail the loop stashed in
+        # turn_state (mechanism-only opaque string; None when not blocked). Keyed
+        # by the core's BLOCK_DETAIL_KEY so we never duplicate the literal.
+        from pyclaw.core.loop import BLOCK_DETAIL_KEY
+        detail = state.get(BLOCK_DETAIL_KEY)
+        _run.last_block_detail = str(detail) if isinstance(detail, str) and detail else None
         return summary
 
     _run.last_grounded = set()
+    _run.last_block_detail = None
     return _run
 
 

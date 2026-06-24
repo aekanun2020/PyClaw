@@ -48,6 +48,15 @@ from pyclaw.skills.loader import SkillLoader
 # any domain's enforce hook that BLOCKs surfaces the same sentinel.
 RESPONSE_BLOCKED = "[response blocked by policy]"
 
+# Mechanism-only key under which `_finalize` stashes the BLOCKing hook's raw
+# `message` into the run's turn_state. The user-facing answer is still the
+# opaque RESPONSE_BLOCKED sentinel (no leak), but the diagnostic detail — e.g.
+# the enforce hook's "cites [...] but never retrieved" line — is preserved here
+# so an outer layer (subagent runner -> orchestrator) can surface WHY a turn was
+# blocked in --trace. It is a plain string keyed in a generic dict; PyClaw core
+# attaches no domain meaning to its contents.
+BLOCK_DETAIL_KEY = "block_detail"
+
 
 class ToolBlocked(Exception):
     """Raised internally when policy/hook/HITL blocks a tool. Carries a reason."""
@@ -284,6 +293,12 @@ class AgentLoop:
             )
         )
         if res.action is HookAction.BLOCK:
+            # Preserve the BLOCKing hook's diagnostic message in turn_state so an
+            # outer layer can report WHY without changing what the user sees
+            # (still the opaque sentinel). Mechanism-only: opaque string in a
+            # generic dict. No-op when turn_state isn't a writable dict.
+            if isinstance(turn_state, dict) and res.message:
+                turn_state[BLOCK_DETAIL_KEY] = str(res.message)
             return RESPONSE_BLOCKED
         if res.action is HookAction.MODIFY and res.modified_payload is not None:
             return str(res.modified_payload.arguments.get("text", text))

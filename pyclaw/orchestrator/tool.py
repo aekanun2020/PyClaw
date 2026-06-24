@@ -102,6 +102,12 @@ def _result_dict(r: RouteResult) -> dict[str, Any]:
         # show the LLM actionable routing guidance instead so it changes
         # strategy rather than retrying reworded.
         "summary": _BLOCKED_GUIDANCE if r.blocked else r.summary,
+        # Diagnostic-only: the BLOCKing hook's raw reason (e.g. which ids were
+        # cited-but-ungrounded), surfaced ONLY on a block so --trace shows WHY
+        # the route failed. Kept SEPARATE from `summary` on purpose: summary is
+        # the actionable "change strategy" instruction the LLM acts on; this is
+        # the human/observability detail. Omitted entirely when not blocked.
+        **({"block_detail": r.block_detail} if r.blocked and r.block_detail else {}),
         "error": r.error,
         # Generic grounded-id set the routed agent recorded, surfaced in the
         # tool result so the orchestrator's PostToolUse hook can merge it into
