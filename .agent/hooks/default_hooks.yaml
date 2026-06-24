@@ -1,38 +1,15 @@
-# Default hooks shipped with PyClaw (Layer 3). These are DETERMINISTIC policies
-# — exactly the logic that must NOT live in a prompt (principle #1).
+# ⚠️ SUPERSEDED — this file is NOT read by the runtime.
 #
-# Register these into a HookEngine at startup. The targets resolve to the
-# ready-to-use implementations in the `pyclaw_hooks` package.
-hooks:
-  # MVP: block destructive operations + writes to protected paths, every time.
-  - name: block-destructive
-    event: PreToolUse
-    runner: python
-    target: pyclaw_hooks.guards:block_destructive
-    priority: 10
-
-  # Auto-format Python files right after they are edited.
-  - name: autoformat
-    event: PostEdit
-    runner: python
-    target: pyclaw_hooks.format:autoformat
-    priority: 20
-
-  # Citation-grounding (PDPA): the 5-round Qwen3.6 benchmark proved a docstring
-  # alone enforces this only 2/5 of the time (compliance-instability). These two
-  # hooks make it deterministic. record-grounding marks each section that
-  # get_section_text actually retrieved; enforce-grounding BLOCKs any final
-  # answer that cites a section never retrieved this turn (fail-closed, #1).
-  # They share per-turn state via the loop's turn_state dict ([A2] in
-  # core/loop.py), so registration order does not matter — only that both fire.
-  - name: record-grounding
-    event: PostToolUse
-    runner: python
-    target: pyclaw_hooks.grounding:record_grounding
-    priority: 50
-
-  - name: enforce-grounding
-    event: PreResponse
-    runner: python
-    target: pyclaw_hooks.grounding:enforce_grounding
-    priority: 50
+# `config.hooks_dir` points here, but NO code consumes it. The only path that
+# registers hooks at startup is PluginLoader.load_all() (cli.py:100), which
+# scans `.agent/plugins/*/plugin.yaml` (loader.py:108,176). Specs placed here
+# were silently never loaded — HookEngine started empty and every answer passed
+# ungated (the CCTV regression: an answer citing ม.23 without retrieval was not
+# blocked).
+#
+# The live hook set now lives in:
+#     .agent/plugins/pdpa-grounding/plugin.yaml   [A4]
+#
+# Keep this file as documentation only. Do NOT add hook specs here expecting
+# them to load — add them to a plugin manifest instead.
+hooks: []

@@ -1,0 +1,50 @@
+# [A4] Plugin manifest that wires PyClaw's default hooks into the LIVE startup
+# path. cli.py:100 calls PluginLoader.load_all(), which only registers hooks
+# declared in `*/plugin.yaml` under `.agent/plugins/` (loader.py:108,176).
+#
+# Before A4, the hook specs lived in `.agent/hooks/default_hooks.yaml`, a file
+# `config.hooks_dir` points at but NO code reads — so HookEngine started empty
+# and every answer passed ungated (root cause of the CCTV trace citing ม.23
+# without retrieval and not being blocked). This manifest moves those specs
+# onto the path the runtime actually scans.
+#
+# Targets resolve to ready-to-use implementations in the `pyclaw_hooks` package.
+name: pdpa-grounding
+version: 0.1.0
+
+hooks:
+  # Core safety: block destructive ops + writes to protected paths, every time.
+  - name: block-destructive
+    event: PreToolUse
+    runner: python
+    target: pyclaw_hooks.guards:block_destructive
+    priority: 10
+
+  # Auto-format Python files right after they are edited.
+  # NOTE: PostEdit currently has no fire-site in loop.py (tracked as B1), so this
+  # hook is registered-but-dormant until an edit tool/fire-site exists. Kept here
+  # for parity with the intended default set.
+  - name: autoformat
+    event: PostEdit
+    runner: python
+    target: pyclaw_hooks.format:autoformat
+    priority: 20
+
+  # Citation-grounding (PDPA). The 5-round Qwen3.6 benchmark proved a docstring
+  # alone enforces this only 2/5 of the time (compliance-instability). These two
+  # hooks make it deterministic. record-grounding marks each section that
+  # get_section_text actually retrieved; enforce-grounding BLOCKs any final
+  # answer that cites a section never retrieved this turn (fail-closed).
+  # They share per-turn state via the loop's turn_state dict ([A2] in
+  # core/loop.py), so registration order does not matter — only that both fire.
+  - name: record-grounding
+    event: PostToolUse
+    runner: python
+    target: pyclaw_hooks.grounding:record_grounding
+    priority: 50
+
+  - name: enforce-grounding
+    event: PreResponse
+    runner: python
+    target: pyclaw_hooks.grounding:enforce_grounding
+    priority: 50

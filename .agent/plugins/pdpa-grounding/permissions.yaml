@@ -1,0 +1,6 @@
+# [A4] No tool allowlist/denylist contributed by this plugin — it ships hooks
+# only. An empty mapping yields a permit-anything-not-blocked policy, merged by
+# loader.load_all() (blocked_tools always wins on union). Present so the load
+# path is explicit; PermissionPolicy.from_yaml tolerates its absence too.
+allowed_tools: []
+blocked_tools: []
