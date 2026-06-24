@@ -65,6 +65,12 @@ class AgentLoop:
     skills: SkillLoader | None = None
     max_tool_rounds: int = SETTINGS.max_tool_rounds
     system_prompt: str = "You are PyClaw, a deterministic-first agent."
+    # Mechanism-only introspection: the per-run turn_state dict from the LAST
+    # `run()` ([A2]). Exposed so a caller that built this loop (e.g. the subagent
+    # runner) can read back generic turn-scoped state a hook recorded — such as
+    # the grounded-id set — WITHOUT the loop knowing what that state means. Stays
+    # domain-agnostic: it is just "the last turn's mutable dict".
+    last_turn_state: dict[str, object] | None = None
 
     def run(self, user_request: str, user: str = "user", on_delta=None,
             on_tool=None) -> str:
@@ -103,6 +109,9 @@ class AgentLoop:
         # PreResponse); other events keep their default empty `extra`.
         # See pyclaw_hooks/grounding.py for the canonical consumer.
         turn_state: dict[str, object] = {}
+        # Mechanism-only: expose this run's turn_state so the builder can read
+        # back generic turn-scoped state (e.g. grounded ids) after run() returns.
+        self.last_turn_state = turn_state
 
         # Append the system prompt only when the conversation is empty. In
         # multi-turn (chat) mode the same context is reused across calls, so a

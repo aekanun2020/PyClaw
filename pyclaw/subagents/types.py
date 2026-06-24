@@ -37,3 +37,12 @@ class SubagentSpec:
     # — backward compatible). The orchestrator sets this from an agent's
     # SOUL.md + TOOLS.md so a routed specialized agent runs with its OWN prompt.
     system_prompt: str | None = None
+    # Optional per-agent plugin root (mechanism, NOT a domain concept). When set,
+    # the isolated loop loads the plugin manifests under this directory into its
+    # OWN HookEngine, so a routed agent runs with exactly the hooks it declares —
+    # e.g. the pdpa-agent loads its citation-grounding plugin and self-enforces
+    # inside its own loop. When None the loop gets an empty engine (current
+    # behaviour — subagents inherit no parent hooks). The orchestrator sets this
+    # to `<agent.home>/plugins` so grounding binds to the agent that needs it,
+    # not to a global engine. Path-typed only; no domain vocabulary lives here.
+    plugins_root: "object | None" = None  # pathlib.Path | None

@@ -1,0 +1,30 @@
+# Per-agent grounding plugin for pdpa-agent (Hole 2, แบบ B).
+#
+# This manifest is loaded ONLY for the pdpa-agent, from its home dir
+# (`agents/pdpa-agent/plugins/*/plugin.yaml`) when the orchestrator spawns it.
+# It is what binds citation-grounding to the agent that actually needs it, per
+# the project rule "grounding ควรผูกกับ agent ที่เกี่ยวข้อง ไม่ยัดเข้า global
+# engine". A non-PDPA agent (db-agent, rag-agent) has no such plugin dir, so it
+# gets a clean HookEngine with NO PDPA enforcement — domains stay isolated by
+# construction (separate engines), not by pattern-scoping luck.
+#
+# It carries ONLY the two grounding hooks. Core safety hooks (block-destructive)
+# stay in `.agent/plugins/` for the flat loop; the orchestrator wires its own
+# safety separately. Targets resolve to the PDPA *wrapper*
+# (pyclaw_hooks_pdpa.grounding), which injects PDPA patterns/tools into the
+# GENERIC core (pyclaw_hooks.grounding). No Thai-law vocabulary lives in core.
+name: pdpa-grounding
+version: 0.1.0
+
+hooks:
+  - name: record-grounding
+    event: PostToolUse
+    runner: python
+    target: pyclaw_hooks_pdpa.grounding:record_grounding
+    priority: 50
+
+  - name: enforce-grounding
+    event: PreResponse
+    runner: python
+    target: pyclaw_hooks_pdpa.grounding:enforce_grounding
+    priority: 50

@@ -98,6 +98,13 @@ class SubagentResult:
     summary: str            # the ONLY thing returned to the parent (isolated context)
     ok: bool = True
     error: str | None = None
+    # Generic turn-scoped grounded-id set the isolated loop recorded (mechanism,
+    # not a domain concept — the runner doesn't know what an id means). Empty
+    # when the agent loaded no grounding plugin or grounded nothing. Bubbled so
+    # the orchestrator can enforce its COMBINED answer against the union of what
+    # every routed agent actually retrieved (the subagent already self-enforces
+    # its OWN answer inside its own loop).
+    grounded: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -173,8 +180,13 @@ class SubagentRunner:
         except Exception as exc:  # noqa: BLE001 - surface as a structured result
             return SubagentResult(spec=spec, summary="", ok=False, error=str(exc))
 
-        # 5. Only the summary crosses back to the parent.
-        return SubagentResult(spec=spec, summary=summary, ok=True)
+        # 5. The summary crosses back to the parent (isolated context). We also
+        #    bubble the generic grounded-id set the isolated loop recorded, if
+        #    the runner exposes it (the real build_isolated_runner does). Injected
+        #    test runners that don't carry one degrade to an empty set.
+        grounded = getattr(runner, "last_grounded", set())
+        grounded = set(grounded) if isinstance(grounded, (set, frozenset)) else set()
+        return SubagentResult(spec=spec, summary=summary, ok=True, grounded=grounded)
 
 
 @dataclass
@@ -253,6 +265,15 @@ def build_isolated_runner(
         llm = OpenRouterProvider(
             model=spec.model_preference or OpenRouterProvider().model
         )
+        # Per-agent hook engine (mechanism, principle: grounding binds to the
+        # agent that needs it, NOT a global engine). If the spec carries a
+        # plugins_root we load THAT agent's manifests into a fresh engine, so
+        # e.g. the pdpa-agent gets its citation-grounding hooks and self-enforces
+        # inside this loop's own PreResponse fire-site. An agent with no plugin
+        # dir (db-agent, rag-agent) keeps an empty engine — domains stay isolated
+        # by SEPARATE engines, not by pattern-scoping luck. No domain vocabulary
+        # appears here; we only pass a Path through to the generic PluginLoader.
+        engine = _load_isolated_hooks(spec)
         # Allowlist to the resolved tools (empty -> nothing permitted, which is
         # the safe default for a read-only EXPLORE/PLAN subagent).
         permissions = PermissionPolicy(allowed_tools=frozenset(spec.allowed_tools))
@@ -271,7 +292,7 @@ def build_isolated_runner(
         # allowlist above still gates every tool dispatch (defence in depth).
         loop = AgentLoop(
             llm=llm,
-            hooks=HookEngine(),          # subagents inherit no parent hooks by default
+            hooks=engine,                # per-agent hooks (empty unless plugins_root set)
             context=ContextManager(),    # FRESH context — isolation
             audit=AuditLog(),
             hitl=HITLGate(),
@@ -281,6 +302,43 @@ def build_isolated_runner(
                 kind=spec.type.value
             ),
         )
-        return loop.run(spec.objective, user="subagent", on_tool=on_tool)
+        summary = loop.run(spec.objective, user="subagent", on_tool=on_tool)
+        # Read back the generic grounded-id set the loop recorded this turn and
+        # stash it on the runner callable so SubagentRunner.spawn can bubble it.
+        # Mechanism-only: we treat it as an opaque set of strings.
+        state = loop.last_turn_state or {}
+        grounded = state.get("grounded_sections")
+        _run.last_grounded = set(grounded) if isinstance(grounded, (set, frozenset)) else set()
+        return summary
 
+    _run.last_grounded = set()
     return _run
+
+
+def _load_isolated_hooks(spec: SubagentSpec) -> HookEngine:
+    """Build the isolated loop's HookEngine for one spec (mechanism only).
+
+    No plugins_root -> an EMPTY engine (current behaviour: subagents inherit no
+    parent hooks). With a plugins_root that exists -> load that directory's
+    plugin manifests into a fresh engine via the GENERIC PluginLoader, so the
+    agent runs with exactly the hooks it declares. This is the per-agent
+    grounding wiring (option B): the loader discovers `<root>/*/plugin.yaml`
+    and binds each hook's `target:` callable. PyClaw core stays domain-agnostic
+    — the only thing that varies per agent is WHICH directory is passed in.
+    """
+    engine = HookEngine()
+    root = getattr(spec, "plugins_root", None)
+    if root is None:
+        return engine
+    from pathlib import Path
+
+    root_path = root if isinstance(root, Path) else Path(str(root))
+    if not root_path.is_dir():
+        return engine
+    from pyclaw.plugins.loader import PluginLoader
+
+    PluginLoader(
+        plugins_root=root_path,
+        installed_versions={"core": "0.1.0"},
+    ).load_all(hooks=engine)
+    return engine

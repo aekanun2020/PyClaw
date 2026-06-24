@@ -1,0 +1,37 @@
+# Orchestrator-level grounding plugin (Hole 2, รู ก — combined-answer enforce).
+#
+# Loaded ONLY into the orchestrator's HookEngine (cli.py:_build_orchestrator_loop),
+# from this dedicated dir so it never collides with the flat-loop `.agent/plugins/`
+# safety set. It closes the orchestrator-level grounding hole: the routed agents
+# self-enforce their OWN answers inside their isolated loops (per-agent plugin,
+# option B), but the orchestrator assembles a NEW combined answer from their
+# summaries — that combined answer was previously unguarded.
+#
+# Two hooks, NO record-grounding: the orchestrator owns no domain tools and
+# never retrieves directly, so there is nothing to record. Instead:
+#   * merge-grounding (PostToolUse) reads the section ids the routed agents
+#     already grounded out of the route_to_agent result and UNIONS them into the
+#     turn's grounded set.
+#   * enforce-grounding (PreResponse) BLOCKs the combined final answer if it
+#     cites any section not in that union.
+# They share per-turn state via the loop's turn_state dict ([A2]).
+#
+# Mechanism stays domain-agnostic in core (pyclaw_hooks.grounding factories);
+# the PDPA *vocabulary* (which tool to merge from, Thai citation patterns) lives
+# in the wrapper (pyclaw_hooks_pdpa.grounding). Another domain ships its own
+# orchestrator manifest the same way.
+name: orchestrator-grounding
+version: 0.1.0
+
+hooks:
+  - name: merge-grounding
+    event: PostToolUse
+    runner: python
+    target: pyclaw_hooks_pdpa.grounding:merge_grounding
+    priority: 50
+
+  - name: enforce-grounding
+    event: PreResponse
+    runner: python
+    target: pyclaw_hooks_pdpa.grounding:enforce_grounding
+    priority: 50

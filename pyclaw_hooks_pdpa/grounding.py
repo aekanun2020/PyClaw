@@ -35,6 +35,7 @@ import re
 from pyclaw_hooks.grounding import (
     default_result_parser,
     make_enforce_grounding,
+    make_merge_grounding,
     make_record_grounding,
 )
 
@@ -107,6 +108,11 @@ PATTERNS = (
 # Tool names that count as a genuine PDPA section retrieval.
 RETRIEVAL_TOOLS = ("get_section_text", "pdpa_get_section_text")
 
+# The orchestrator's delegation tool. Its result carries the section ids the
+# routed agents already grounded; the merge hook unions them into the turn so
+# the orchestrator's enforce hook can check the COMBINED answer.
+MERGE_TOOLS = ("route_to_agent",)
+
 # ---- ready-to-use hook callables (what plugin.yaml targets) ------------------
 
 record_grounding = make_record_grounding(
@@ -114,6 +120,13 @@ record_grounding = make_record_grounding(
     canon=canon,
     parse_result=default_result_parser(canon),
     source_hook="pdpa.record_grounding",
+)
+
+merge_grounding = make_merge_grounding(
+    merge_tools=MERGE_TOOLS,
+    grounded_key="grounded",
+    routes_key="routes",
+    source_hook="pdpa.merge_grounding",
 )
 
 enforce_grounding = make_enforce_grounding(

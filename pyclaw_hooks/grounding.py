@@ -186,6 +186,65 @@ def make_record_grounding(
     return record_grounding
 
 
+def make_merge_grounding(
+    *,
+    merge_tools: Iterable[str],
+    grounded_key: str = "grounded",
+    routes_key: str = "routes",
+    source_hook: str = "merge_grounding",
+) -> Callable[[HookPayload], HookResult]:
+    """Build a PostToolUse hook that UNIONS already-grounded ids from a tool.
+
+    The grounding *mechanism* at the orchestrator level differs from a leaf
+    agent: the orchestrator never calls a retrieval tool itself, but a
+    delegation tool (e.g. `route_to_agent`) returns the ids the routed agents
+    ALREADY grounded. This hook reads those ids straight out of the tool result
+    and unions them into the turn's grounded set, so the orchestrator's
+    PreResponse `enforce_grounding` can check its COMBINED answer against what
+    the agents actually retrieved.
+
+    It is fully generic: WHICH tool to watch (`merge_tools`) and WHERE the ids
+    live in the result (`grounded_key`, optionally nested under `routes_key`)
+    are injected. No domain pattern, tool name, or vocabulary is hard-coded; the
+    ids are treated as opaque strings. A leaf agent never loads this hook (its
+    plugin only carries record+enforce), so nothing here fires for it.
+    """
+    tools = frozenset(merge_tools)
+
+    def _ids_from(obj: Any) -> set[str]:
+        """Pull a flat set of id strings out of one result shape."""
+        data = _coerce_payload(obj)
+        if not isinstance(data, dict):
+            return set()
+        ids: set[str] = set()
+        direct = data.get(grounded_key)
+        if isinstance(direct, (list, tuple, set)):
+            ids.update(str(x) for x in direct)
+        routes = data.get(routes_key)
+        if isinstance(routes, (list, tuple)):
+            for r in routes:
+                if isinstance(r, dict):
+                    sub = r.get(grounded_key)
+                    if isinstance(sub, (list, tuple, set)):
+                        ids.update(str(x) for x in sub)
+        return ids
+
+    def merge_grounding(payload: HookPayload) -> HookResult:
+        if (payload.tool or "") not in tools:
+            return HookResult(action=HookAction.ALLOW)
+        ids = _ids_from(payload.result)
+        if not ids:
+            return HookResult(action=HookAction.ALLOW, source_hook=source_hook)
+        _grounded_set(payload).update(ids)
+        return HookResult(
+            action=HookAction.ALLOW,
+            message=f"merged grounded {sorted(ids)}",
+            source_hook=source_hook,
+        )
+
+    return merge_grounding
+
+
 def make_enforce_grounding(
     *,
     patterns: Iterable[Pattern],

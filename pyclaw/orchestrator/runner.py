@@ -36,7 +36,7 @@ spawn further agents (the runner strips spawn tools + guards is_nested).
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pyclaw.hooks import HookEngine
 from pyclaw.orchestrator.registry import AgentRegistry, AgentSpec
@@ -57,6 +57,12 @@ class RouteResult:
     summary: str
     ok: bool = True
     error: str | None = None
+    # The generic grounded-id set the routed agent's isolated loop recorded,
+    # bubbled up from SubagentResult.grounded. The orchestrator unions these
+    # across all routes and enforces its COMBINED final answer against them
+    # (closing the orchestrator-level grounding hole). Empty for an agent that
+    # loaded no grounding plugin. Mechanism-only: opaque set of strings here.
+    grounded: set[str] = field(default_factory=set)
 
 
 def _agent_label(name: str) -> str:
@@ -107,6 +113,11 @@ class OrchestratorRunner:
             type=SubagentType.GENERAL,
             objective=message,
             system_prompt=system_prompt,
+            # Per-agent grounding (option B): point the isolated loop at this
+            # agent's own `<home>/plugins` dir so it loads exactly the hook
+            # plugins it declares. None for an agent with no plugins dir, so the
+            # isolated loop keeps an empty engine (unchanged behaviour).
+            plugins_root=agent.plugins_root(),
         )
 
     def route_one(self, agent_name: str, message: str, on_tool=None) -> RouteResult:
@@ -125,6 +136,7 @@ class OrchestratorRunner:
         return RouteResult(
             agent=agent_name, message=message,
             summary=result.summary, ok=result.ok, error=result.error,
+            grounded=set(result.grounded),
         )
 
     def route_parallel(

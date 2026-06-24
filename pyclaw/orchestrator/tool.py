@@ -80,6 +80,12 @@ def _result_dict(r: RouteResult) -> dict[str, Any]:
         "ok": r.ok,
         "summary": r.summary,
         "error": r.error,
+        # Generic grounded-id set the routed agent recorded, surfaced in the
+        # tool result so the orchestrator's PostToolUse hook can merge it into
+        # the turn's grounded set and the PreResponse hook can enforce the
+        # COMBINED answer against the union (mechanism-only; sorted for stable
+        # serialisation). Empty for agents with no grounding plugin.
+        "grounded": sorted(r.grounded),
     }
 
 

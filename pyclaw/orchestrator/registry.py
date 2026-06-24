@@ -43,6 +43,12 @@ AGENTS_HOME_DIRNAME = "agents"
 # (between TOOLS.md and the guardrail). AUTO/MANUAL skills are NOT injected here
 # — they are resolved at task time by SkillLoader.
 SKILLS_DIRNAME = "skills"
+# Per-agent plugins layer: `<home>/plugins/*/plugin.yaml`. Each agent loads its
+# OWN plugin manifests into its OWN isolated HookEngine when the orchestrator
+# spawns it, so grounding (and any other hook policy) binds to the agent that
+# needs it rather than a global engine. This is a directory CONVENTION only —
+# core stays domain-agnostic; the manifests name the domain hooks.
+PLUGINS_DIRNAME = "plugins"
 
 
 @dataclass
@@ -75,6 +81,19 @@ class AgentSpec:
             return None
         text = candidate.read_text(encoding="utf-8").strip()
         return text or None
+
+    def plugins_root(self) -> Path | None:
+        """The agent's `<home>/plugins` dir if it exists, else None.
+
+        Returned to the orchestrator so a routed agent's isolated loop loads
+        exactly the hook plugins this agent declares (per-agent grounding,
+        option B). None when the agent has no home or no plugins dir, so an
+        agent without grounding (db-agent, rag-agent) runs with an empty engine.
+        """
+        if self.home is None:
+            return None
+        candidate = self.home / PLUGINS_DIRNAME
+        return candidate if candidate.is_dir() else None
 
     def load_soul(self) -> str | None:
         """The agent's SOUL.md body, or None when absent."""

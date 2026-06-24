@@ -139,6 +139,26 @@ def _build_loop(*, with_memory: bool = True, with_skills: bool = True,
     return loop
 
 
+def _load_orchestrator_hooks(hooks) -> None:
+    """Load the orchestrator-level plugin manifests into `hooks` (mechanism only).
+
+    Scans `.agent/orchestrator-plugins/*/plugin.yaml` via the GENERIC
+    PluginLoader — a dedicated dir kept SEPARATE from the flat-loop
+    `.agent/plugins/` so the two hook sets never collide. Absent dir -> no-op
+    (the engine stays empty, unchanged behaviour). PyClaw core names no domain
+    hook here; the manifest does. We swallow nothing — a malformed manifest
+    should fail loudly (principle #6), same as the flat loop.
+    """
+    from pyclaw.plugins.loader import PluginLoader
+
+    root = SETTINGS.agent_dir / "orchestrator-plugins"
+    if not root.is_dir():
+        return
+    PluginLoader(
+        plugins_root=root, installed_versions={"core": "0.1.0"}
+    ).load_all(hooks=hooks)
+
+
 def _build_orchestrator_loop():
     """Assemble an Orchestrator AgentLoop (Feature #2).
 
@@ -166,7 +186,16 @@ def _build_orchestrator_loop():
     from pyclaw.runtime.hitl import HITLGate
     from pyclaw.subagents.tool import _make_tool_provider
 
+    # Orchestrator-level grounding (Hole 2, รู ก). The routed agents self-enforce
+    # their own answers in their isolated loops (per-agent plugin), but the
+    # orchestrator assembles a NEW combined answer — so it loads its OWN
+    # grounding plugin (merge + enforce, no record) into this engine. The merge
+    # hook unions the ids the agents already grounded (from the route_to_agent
+    # result) into the turn; enforce BLOCKs the combined answer on any cited-but-
+    # ungrounded id, via the loop's existing PreResponse fire-site. Mechanism-
+    # only: the manifest names the domain hooks; core stays domain-agnostic.
     hooks = HookEngine()
+    _load_orchestrator_hooks(hooks)
 
     # Real domain tools live here; the specialized agents draw from this set.
     domain_tools = ToolRegistry()
