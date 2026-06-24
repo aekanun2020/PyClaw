@@ -94,6 +94,16 @@ class AgentLoop:
     def _run(self, user_request: str, user: str, on_delta=None, on_tool=None) -> str:
         self.hooks.fire(HookPayload(event=HookEvent.PRE_SESSION, user=user))
 
+        # [A2] Turn-scoped state: a single mutable dict that lives for exactly
+        # this run and is threaded by-reference into the stateful hooks. It lets
+        # a PostToolUse hook record something (e.g. grounded section ids) that a
+        # later PreResponse hook reads back in the SAME run — the two events get
+        # different HookPayloads, so without a shared container the state would
+        # be lost. Passed only to the events that need it (PostToolUse,
+        # PreResponse); other events keep their default empty `extra`.
+        # See pyclaw_hooks/grounding.py for the canonical consumer.
+        turn_state: dict[str, object] = {}
+
         # Append the system prompt only when the conversation is empty. In
         # multi-turn (chat) mode the same context is reused across calls, so a
         # second SYSTEM message here would duplicate the prompt (and memory /
@@ -125,7 +135,7 @@ class AgentLoop:
                 # the *finalized* text (post PreResponse hook) so the persisted
                 # history matches exactly what the user saw. (#bug: plain-text
                 # answers were previously never appended.)
-                final = self._finalize(response.text, user)
+                final = self._finalize(response.text, user, turn_state)
                 self.context.append(Message(role=Role.ASSISTANT, content=final))
                 return final
 
@@ -145,7 +155,7 @@ class AgentLoop:
                 )
             )
             for call in response.tool_calls:
-                output = self._invoke_tool(call, user, on_tool)
+                output = self._invoke_tool(call, user, on_tool, turn_state)
                 self.context.append(
                     Message(
                         role=Role.TOOL,
@@ -156,11 +166,20 @@ class AgentLoop:
 
         # Ran out of rounds without a plain-text answer.
         return self._finalize(
-            "Reached max_tool_rounds without a final answer.", user
+            "Reached max_tool_rounds without a final answer.", user, turn_state
         )
 
-    def _invoke_tool(self, call: ToolCall, user: str, on_tool=None) -> object:
-        """The single deterministic chokepoint for every tool call."""
+    def _invoke_tool(self, call: ToolCall, user: str, on_tool=None,
+                     turn_state: dict[str, object] | None = None) -> object:
+        """The single deterministic chokepoint for every tool call.
+
+        `turn_state` is the per-run mutable dict threaded in from `_run` ([A2]);
+        it is forwarded to the PostToolUse hook so a stateful hook (e.g.
+        record_grounding) can persist data the PreResponse hook reads later in
+        the same run. Defaults to an empty dict when called outside a run.
+        """
+        if turn_state is None:
+            turn_state = {}
         name, args = call.name, dict(call.arguments)
 
         # L5 — permission policy (fail-closed).
@@ -220,7 +239,7 @@ class AgentLoop:
         post = self.hooks.fire(
             HookPayload(
                 event=HookEvent.POST_TOOL_USE, tool=name, arguments=args,
-                result=result, user=user,
+                result=result, user=user, extra=turn_state,
             )
         )
         if post.action is HookAction.MODIFY and post.modified_payload is not None:
@@ -233,10 +252,19 @@ class AgentLoop:
         )
         return result
 
-    def _finalize(self, text: str, user: str) -> str:
-        """PreResponse hook — last chance to redact/modify before the user sees it."""
+    def _finalize(self, text: str, user: str,
+                  turn_state: dict[str, object] | None = None) -> str:
+        """PreResponse hook — last chance to redact/modify before the user sees it.
+
+        `turn_state` ([A2]) is forwarded as the payload's `extra` so a
+        PreResponse hook (e.g. enforce_grounding) can read state recorded by
+        earlier PostToolUse hooks in the same run.
+        """
         res = self.hooks.fire(
-            HookPayload(event=HookEvent.PRE_RESPONSE, arguments={"text": text}, user=user)
+            HookPayload(
+                event=HookEvent.PRE_RESPONSE, arguments={"text": text}, user=user,
+                extra=turn_state if turn_state is not None else {},
+            )
         )
         if res.action is HookAction.BLOCK:
             return "[response blocked by policy]"

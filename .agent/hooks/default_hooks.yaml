@@ -17,3 +17,22 @@ hooks:
     runner: python
     target: pyclaw_hooks.format:autoformat
     priority: 20
+
+  # Citation-grounding (PDPA): the 5-round Qwen3.6 benchmark proved a docstring
+  # alone enforces this only 2/5 of the time (compliance-instability). These two
+  # hooks make it deterministic. record-grounding marks each section that
+  # get_section_text actually retrieved; enforce-grounding BLOCKs any final
+  # answer that cites a section never retrieved this turn (fail-closed, #1).
+  # They share per-turn state via the loop's turn_state dict ([A2] in
+  # core/loop.py), so registration order does not matter — only that both fire.
+  - name: record-grounding
+    event: PostToolUse
+    runner: python
+    target: pyclaw_hooks.grounding:record_grounding
+    priority: 50
+
+  - name: enforce-grounding
+    event: PreResponse
+    runner: python
+    target: pyclaw_hooks.grounding:enforce_grounding
+    priority: 50
